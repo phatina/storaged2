@@ -34,6 +34,10 @@
 #include <glib.h>
 #include <glib-object.h>
 
+#include <gudev/gudev.h>
+
+#include "udisksdaemon.h"
+#include "udiskslinuxprovider.h"
 #include "udiskslogging.h"
 #include "udisksmountmonitor.h"
 #include "udisksmount.h"
@@ -66,6 +70,8 @@ struct _UDisksMountMonitor
 {
   GObject parent_instance;
 
+  UDisksDaemon *daemon;
+
   GIOChannel *mounts_channel;
   GSource *mounts_watch_source;
 
@@ -95,6 +101,12 @@ struct _UDisksMountMonitorClass
 };
 
 /*--------------------------------------------------------------------------------------------------------------*/
+
+enum
+  {
+    PROP_0,
+    PROP_DAEMON,
+  };
 
 enum
   {
@@ -149,12 +161,72 @@ udisks_mount_monitor_init (UDisksMountMonitor *monitor)
 }
 
 static void
+udisks_mount_monitor_get_property (GObject    *object,
+                                   guint       prop_id,
+                                   GValue     *value,
+                                   GParamSpec *pspec)
+{
+  UDisksMountMonitor *monitor = UDISKS_MOUNT_MONITOR (object);
+
+  switch (prop_id)
+    {
+    case PROP_DAEMON:
+      g_value_set_object (value, monitor->daemon);
+      break;
+
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+    }
+}
+
+static void
+udisks_mount_monitor_set_property (GObject      *object,
+                                   guint         prop_id,
+                                   const GValue *value,
+                                   GParamSpec   *pspec)
+{
+  UDisksMountMonitor *monitor = UDISKS_MOUNT_MONITOR (object);
+
+  switch (prop_id)
+    {
+    case PROP_DAEMON:
+      g_assert (monitor->daemon == NULL);
+      /* We don't take a reference to the daemon */
+      monitor->daemon = g_value_get_object (value);
+      break;
+
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+    }
+}
+
+static void
 udisks_mount_monitor_class_init (UDisksMountMonitorClass *klass)
 {
   GObjectClass *gobject_class = (GObjectClass *) klass;
 
   gobject_class->finalize    = udisks_mount_monitor_finalize;
   gobject_class->constructed = udisks_mount_monitor_constructed;
+  gobject_class->get_property = udisks_mount_monitor_get_property;
+  gobject_class->set_property = udisks_mount_monitor_set_property;
+
+  /**
+   * UDisksMountMonitor:daemon:
+   *
+   * The #UDisksDaemon for the object.
+   */
+  g_object_class_install_property (gobject_class,
+                                   PROP_DAEMON,
+                                   g_param_spec_object ("daemon",
+                                                        "Daemon",
+                                                        "The daemon for the object",
+                                                        UDISKS_TYPE_DAEMON,
+                                                        G_PARAM_READABLE |
+                                                        G_PARAM_WRITABLE |
+                                                        G_PARAM_CONSTRUCT_ONLY |
+                                                        G_PARAM_STATIC_STRINGS));
 
   /**
    * UDisksMountMonitor::mount-added
@@ -391,6 +463,7 @@ udisks_mount_monitor_constructed (GObject *object)
 
 /**
  * udisks_mount_monitor_new:
+ * @daemon: A #UDisksDaemon instance.
  *
  * Creates a new #UDisksMountMonitor object.
  *
@@ -401,9 +474,10 @@ udisks_mount_monitor_constructed (GObject *object)
  * Returns: A #UDisksMountMonitor. Free with g_object_unref().
  */
 UDisksMountMonitor *
-udisks_mount_monitor_new (void)
+udisks_mount_monitor_new (UDisksDaemon  *daemon)
 {
-  return UDISKS_MOUNT_MONITOR (g_object_new (UDISKS_TYPE_MOUNT_MONITOR, NULL));
+  return UDISKS_MOUNT_MONITOR (g_object_new (UDISKS_TYPE_MOUNT_MONITOR,
+                                             "daemon", daemon, NULL));
 }
 
 static gboolean
@@ -462,8 +536,11 @@ static void
 udisks_mount_monitor_parse_mountinfo (UDisksMountMonitor  *monitor,
                                       const gchar         *contents)
 {
+  const gchar *gudev_subsystems[] = { "block", "iscsi_connection", "scsi", NULL };
   gchar **lines;
   guint n;
+  UDisksLinuxProvider *provider;
+  GUdevClient *gudev_client;
 
   /* See Documentation/filesystems/proc.txt for the format of /proc/self/mountinfo
    *
@@ -471,6 +548,14 @@ udisks_mount_monitor_parse_mountinfo (UDisksMountMonitor  *monitor,
    */
   if (contents == NULL)
     return;
+
+  /* UDisksMountMonitor is constructed in early phases of the daemon startup
+   * and UDisksLinuxProvider might not have been created yet. */
+  provider = udisks_daemon_get_linux_provider (monitor->daemon);
+  if (provider)
+    gudev_client = g_object_ref (udisks_linux_provider_get_udev_client (provider));
+  else
+    gudev_client = g_udev_client_new (gudev_subsystems);
 
   lines = g_strsplit (contents, "\n", 0);
   for (n = 0; lines[n] != NULL; n++)
@@ -481,7 +566,9 @@ udisks_mount_monitor_parse_mountinfo (UDisksMountMonitor  *monitor,
       gchar encoded_root[PATH_MAX + 1];
       gchar encoded_mount_point[PATH_MAX + 1];
       gchar *mount_point;
+      const gchar *fs_uuid = NULL;
       dev_t dev;
+      GUdevDevice *gudev_device;
 
       if (strlen (lines[n]) == 0)
         continue;
@@ -506,7 +593,7 @@ udisks_mount_monitor_parse_mountinfo (UDisksMountMonitor  *monitor,
        *  https://bugzilla.redhat.com/show_bug.cgi?id=495152#c31
        *  http://article.gmane.org/gmane.comp.file-systems.btrfs/2851
        *
-       * for details.
+       * for details. Still valid as of kernel 5.9.16.
        */
       if (major == 0)
         {
@@ -556,19 +643,26 @@ udisks_mount_monitor_parse_mountinfo (UDisksMountMonitor  *monitor,
           dev = makedev (major, minor);
         }
 
+      /* Get the filesystem UUID using real device numbers */
+      gudev_device = g_udev_client_query_by_device_number (gudev_client, G_UDEV_DEVICE_TYPE_BLOCK, dev);
+      if (gudev_device != NULL)
+        fs_uuid = g_udev_device_get_property (gudev_device, "ID_FS_UUID");
+
       mount_point = g_strcompress (encoded_mount_point);
 
       /* TODO: we can probably use a hash table or something if this turns out to be slow */
       if (!have_mount (monitor, dev, mount_point))
         {
           UDisksMount *mount;
-          mount = _udisks_mount_new (dev, mount_point, UDISKS_MOUNT_TYPE_FILESYSTEM);
+          mount = _udisks_mount_new (dev, mount_point, fs_uuid, UDISKS_MOUNT_TYPE_FILESYSTEM);
           monitor->mounts = g_list_prepend (monitor->mounts, mount);
         }
 
       g_free (mount_point);
+      g_clear_object (&gudev_device);
     }
   g_strfreev (lines);
+  g_object_unref (gudev_client);
 }
 
 /* ---------------------------------------------------------------------------------------------------- */
@@ -640,7 +734,7 @@ udisks_mount_monitor_parse_swaps (UDisksMountMonitor  *monitor,
       if (!have_mount (monitor, dev, NULL))
         {
           UDisksMount *mount;
-          mount = _udisks_mount_new (dev, NULL, UDISKS_MOUNT_TYPE_SWAP);
+          mount = _udisks_mount_new (dev, NULL, NULL, UDISKS_MOUNT_TYPE_SWAP);
           monitor->mounts = g_list_prepend (monitor->mounts, mount);
         }
     }
@@ -738,6 +832,49 @@ udisks_mount_monitor_get_mounts_for_dev (UDisksMountMonitor *monitor,
       UDisksMount *mount = UDISKS_MOUNT (l->data);
 
       if (udisks_mount_get_dev (mount) == dev)
+        {
+          ret = g_list_prepend (ret, g_object_ref (mount));
+        }
+    }
+
+  g_mutex_unlock (&monitor->mounts_mutex);
+
+  /* Sort the list to ensure that shortest mount paths appear first */
+  ret = g_list_sort (ret, (GCompareFunc) udisks_mount_compare);
+
+  return ret;
+}
+
+/**
+ * udisks_mount_monitor_get_mounts_for_fs_uuid:
+ * @monitor: A #UDisksMountMonitor.
+ * @fs_uuid: A filesystem UUID string.
+ *
+ * Gets all #UDisksMount objects for @fs_uuid.
+ *
+ * Returns: A #GList of #UDisksMount objects. The returned list must
+ * be freed with g_list_free() after each element has been freed with
+ * g_object_unref().
+ */
+GList *
+udisks_mount_monitor_get_mounts_for_fs_uuid (UDisksMountMonitor  *monitor,
+                                             const gchar         *fs_uuid)
+{
+  GList *ret;
+  GList *l;
+
+  ret = NULL;
+
+  udisks_mount_monitor_ensure (monitor);
+
+  g_mutex_lock (&monitor->mounts_mutex);
+
+  for (l = monitor->mounts; l != NULL; l = l->next)
+    {
+      UDisksMount *mount = UDISKS_MOUNT (l->data);
+
+      if (udisks_mount_get_mount_type (mount) == UDISKS_MOUNT_TYPE_FILESYSTEM &&
+          g_strcmp0 (udisks_mount_get_fs_uuid (mount), fs_uuid) == 0)
         {
           ret = g_list_prepend (ret, g_object_ref (mount));
         }

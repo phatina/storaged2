@@ -25,6 +25,7 @@
 #include <src/udisksdaemonutil.h>
 #include <src/udiskslinuxblockobject.h>
 #include <src/udiskslinuxdevice.h>
+#include <src/udiskslinuxfilesystem.h>
 #include <src/udiskslogging.h>
 #include <src/udisksmodule.h>
 #include <src/udisksmoduleobject.h>
@@ -329,10 +330,13 @@ handle_set_label (UDisksFilesystemBTRFS *fs_btrfs,
                   GVariant              *arg_options)
 {
   UDisksLinuxFilesystemBTRFS *l_fs_btrfs = UDISKS_LINUX_FILESYSTEM_BTRFS (fs_btrfs);
+  UDisksFilesystem *filesystem;
   UDisksLinuxBlockObject *object = NULL;
   UDisksDaemon *daemon;
   GError *error = NULL;
   gchar *dev_file = NULL;
+  GList *siblings;
+  GList *l;
 
   object = udisks_daemon_util_dup_object (l_fs_btrfs, &error);
   if (! object)
@@ -342,6 +346,7 @@ handle_set_label (UDisksFilesystemBTRFS *fs_btrfs,
     }
 
   daemon = udisks_module_get_daemon (UDISKS_MODULE (l_fs_btrfs->module));
+  filesystem = udisks_object_peek_filesystem (UDISKS_OBJECT (object));
 
   /* Policy check. */
   UDISKS_DAEMON_CHECK_AUTHORIZATION (daemon,
@@ -367,7 +372,19 @@ handle_set_label (UDisksFilesystemBTRFS *fs_btrfs,
       goto out;
     }
 
+  /* Trigger uevent on the current filesystem and all siblings */
   udisks_linux_block_object_trigger_uevent_sync (object, UDISKS_DEFAULT_WAIT_TIMEOUT);
+  if (udisks_filesystem_btrfs_get_num_devices (fs_btrfs) > 1)
+    {
+      siblings = udisks_linux_filesystem_find_siblings (UDISKS_LINUX_FILESYSTEM (filesystem), object);
+      for (l = siblings; l != NULL; l = l->next)
+        {
+          UDisksLinuxBlockObject *obj = UDISKS_LINUX_BLOCK_OBJECT (l->data);
+          /* TODO: parallelize */
+          udisks_linux_block_object_trigger_uevent_sync (obj, UDISKS_DEFAULT_WAIT_TIMEOUT);
+        }
+      g_list_free_full (siblings, g_object_unref);
+    }
 
   /* Complete DBus call. */
   udisks_filesystem_btrfs_complete_set_label (fs_btrfs, invocation);
@@ -386,10 +403,13 @@ btrfs_subvolume_perform_action (UDisksFilesystemBTRFS *fs_btrfs,
                                 const gchar           *polkit_message)
 {
   UDisksLinuxFilesystemBTRFS *l_fs_btrfs = UDISKS_LINUX_FILESYSTEM_BTRFS (fs_btrfs);
+  UDisksFilesystem *filesystem;
   UDisksLinuxBlockObject *object = NULL;
   UDisksDaemon *daemon;
   GError *error = NULL;
   gchar *mount_point = NULL;
+  GList *siblings;
+  GList *l;
 
   object = udisks_daemon_util_dup_object (l_fs_btrfs, &error);
   if (! object)
@@ -399,6 +419,7 @@ btrfs_subvolume_perform_action (UDisksFilesystemBTRFS *fs_btrfs,
     }
 
   daemon = udisks_module_get_daemon (UDISKS_MODULE (l_fs_btrfs->module));
+  filesystem = udisks_object_peek_filesystem (UDISKS_OBJECT (object));
 
   /* Policy check. */
   UDISKS_DAEMON_CHECK_AUTHORIZATION (daemon,
@@ -433,7 +454,16 @@ btrfs_subvolume_perform_action (UDisksFilesystemBTRFS *fs_btrfs,
       goto out;
     }
 
+  /* Trigger uevent on the current filesystem and all siblings */
   udisks_linux_block_object_trigger_uevent_sync (object, UDISKS_DEFAULT_WAIT_TIMEOUT);
+  siblings = udisks_linux_filesystem_find_siblings (UDISKS_LINUX_FILESYSTEM (filesystem), object);
+  for (l = siblings; l != NULL; l = l->next)
+    {
+      UDisksLinuxBlockObject *obj = UDISKS_LINUX_BLOCK_OBJECT (l->data);
+      /* TODO: parallelize */
+      udisks_linux_block_object_trigger_uevent_sync (obj, UDISKS_DEFAULT_WAIT_TIMEOUT);
+    }
+  g_list_free_full (siblings, g_object_unref);
 
   /* Complete DBus call. */
   g_dbus_method_invocation_return_value (invocation, g_variant_new ("()"));
@@ -455,6 +485,7 @@ btrfs_device_perform_action (UDisksFilesystemBTRFS *fs_btrfs,
                              GVariant              *arg_options)
 {
   UDisksLinuxFilesystemBTRFS *l_fs_btrfs = UDISKS_LINUX_FILESYSTEM_BTRFS (fs_btrfs);
+  UDisksFilesystem *filesystem;
   UDisksLinuxBlockObject *object = NULL;
   GError *error = NULL;
   gchar *mount_point = NULL;
@@ -462,6 +493,8 @@ btrfs_device_perform_action (UDisksFilesystemBTRFS *fs_btrfs,
   UDisksDaemon *daemon;
   UDisksObject *new_device_object = NULL;
   UDisksBlock *new_device_block = NULL;
+  GList *siblings;
+  GList *l;
 
   object = udisks_daemon_util_dup_object (fs_btrfs, &error);
   if (! object)
@@ -471,6 +504,7 @@ btrfs_device_perform_action (UDisksFilesystemBTRFS *fs_btrfs,
     }
 
   daemon = udisks_module_get_daemon (UDISKS_MODULE (l_fs_btrfs->module));
+  filesystem = udisks_object_peek_filesystem (UDISKS_OBJECT (object));
 
   /* Policy check. */
   UDISKS_DAEMON_CHECK_AUTHORIZATION (daemon,
@@ -519,9 +553,25 @@ btrfs_device_perform_action (UDisksFilesystemBTRFS *fs_btrfs,
       goto out;
     }
 
-  /* Trigger uevent on the filesystem and on the added/removed device */
+  /* Trigger uevent on the current filesystem and all siblings */
   udisks_linux_block_object_trigger_uevent_sync (object, UDISKS_DEFAULT_WAIT_TIMEOUT);
+  /* Avoid potential race condition with udev or UDisks not yet finished
+   * probing the newly added/removed device.
+   */
   udisks_daemon_util_trigger_uevent_sync (daemon, device, NULL, UDISKS_DEFAULT_WAIT_TIMEOUT);
+  siblings = udisks_linux_filesystem_find_siblings (UDISKS_LINUX_FILESYSTEM (filesystem), object);
+  for (l = siblings; l != NULL; l = l->next)
+    {
+      UDisksLinuxBlockObject *obj = UDISKS_LINUX_BLOCK_OBJECT (l->data);
+      gchar *obj_device_file;
+
+      /* TODO: parallelize */
+      obj_device_file = udisks_linux_block_object_get_device_file (obj);
+      if (g_strcmp0 (obj_device_file, device) != 0)
+        udisks_linux_block_object_trigger_uevent_sync (obj, UDISKS_DEFAULT_WAIT_TIMEOUT);
+      g_free (obj_device_file);
+    }
+  g_list_free_full (siblings, g_object_unref);
 
   /* Complete DBus call. */
   g_dbus_method_invocation_return_value (invocation, g_variant_new ("()"));
@@ -732,10 +782,13 @@ handle_repair (UDisksFilesystemBTRFS *fs_btrfs,
                GVariant              *arg_options)
 {
   UDisksLinuxFilesystemBTRFS *l_fs_btrfs = UDISKS_LINUX_FILESYSTEM_BTRFS (fs_btrfs);
+  UDisksFilesystem *filesystem;
   UDisksLinuxBlockObject *object = NULL;
   UDisksDaemon *daemon;
   GError *error = NULL;
   gchar *dev_file = NULL;
+  GList *siblings;
+  GList *l;
 
   object = udisks_daemon_util_dup_object (l_fs_btrfs, &error);
   if (! object)
@@ -745,6 +798,7 @@ handle_repair (UDisksFilesystemBTRFS *fs_btrfs,
     }
 
   daemon = udisks_module_get_daemon (UDISKS_MODULE (l_fs_btrfs->module));
+  filesystem = udisks_object_peek_filesystem (UDISKS_OBJECT (object));
 
   /* Policy check. */
   UDISKS_DAEMON_CHECK_AUTHORIZATION (daemon,
@@ -771,6 +825,17 @@ handle_repair (UDisksFilesystemBTRFS *fs_btrfs,
     }
 
   udisks_linux_block_object_trigger_uevent_sync (object, UDISKS_DEFAULT_WAIT_TIMEOUT);
+  if (udisks_filesystem_btrfs_get_num_devices (fs_btrfs) > 1)
+    {
+      siblings = udisks_linux_filesystem_find_siblings (UDISKS_LINUX_FILESYSTEM (filesystem), object);
+      for (l = siblings; l != NULL; l = l->next)
+        {
+          UDisksLinuxBlockObject *obj = UDISKS_LINUX_BLOCK_OBJECT (l->data);
+          /* TODO: parallelize */
+          udisks_linux_block_object_trigger_uevent_sync (obj, UDISKS_DEFAULT_WAIT_TIMEOUT);
+        }
+      g_list_free_full (siblings, g_object_unref);
+    }
 
   /* Complete DBus call. */
   udisks_filesystem_btrfs_complete_repair (fs_btrfs, invocation);
@@ -790,10 +855,13 @@ handle_resize (UDisksFilesystemBTRFS *fs_btrfs,
                GVariant              *arg_options)
 {
   UDisksLinuxFilesystemBTRFS *l_fs_btrfs = UDISKS_LINUX_FILESYSTEM_BTRFS (fs_btrfs);
+  UDisksFilesystem *filesystem;
   UDisksLinuxBlockObject *object = NULL;
   UDisksDaemon *daemon;
   GError *error = NULL;
   gchar *mount_point = NULL;
+  GList *siblings;
+  GList *l;
 
   object = udisks_daemon_util_dup_object (l_fs_btrfs, &error);
   if (! object)
@@ -803,6 +871,7 @@ handle_resize (UDisksFilesystemBTRFS *fs_btrfs,
     }
 
   daemon = udisks_module_get_daemon (UDISKS_MODULE (l_fs_btrfs->module));
+  filesystem = udisks_object_peek_filesystem (UDISKS_OBJECT (object));
 
   /* Policy check. */
   UDISKS_DAEMON_CHECK_AUTHORIZATION (daemon,
@@ -828,6 +897,17 @@ handle_resize (UDisksFilesystemBTRFS *fs_btrfs,
     }
 
   udisks_linux_block_object_trigger_uevent_sync (object, UDISKS_DEFAULT_WAIT_TIMEOUT);
+  if (udisks_filesystem_btrfs_get_num_devices (fs_btrfs) > 1)
+    {
+      siblings = udisks_linux_filesystem_find_siblings (UDISKS_LINUX_FILESYSTEM (filesystem), object);
+      for (l = siblings; l != NULL; l = l->next)
+        {
+          UDisksLinuxBlockObject *obj = UDISKS_LINUX_BLOCK_OBJECT (l->data);
+          /* TODO: parallelize */
+          udisks_linux_block_object_trigger_uevent_sync (obj, UDISKS_DEFAULT_WAIT_TIMEOUT);
+        }
+      g_list_free_full (siblings, g_object_unref);
+    }
 
   /* Complete DBus call. */
   udisks_filesystem_btrfs_complete_resize (fs_btrfs, invocation);

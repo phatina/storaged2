@@ -32,6 +32,7 @@ G_BEGIN_DECLS
 GType            udisks_mount_get_type       (void) G_GNUC_CONST;
 UDisksMountType  udisks_mount_get_mount_type (UDisksMount *mount);
 const gchar     *udisks_mount_get_mount_path (UDisksMount *mount);
+const gchar     *udisks_mount_get_fs_uuid    (UDisksMount *mount);
 dev_t            udisks_mount_get_dev        (UDisksMount *mount);
 gint             udisks_mount_compare        (UDisksMount *mount,
                                               UDisksMount *other_mount);

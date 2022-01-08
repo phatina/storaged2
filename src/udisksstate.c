@@ -73,6 +73,9 @@
  *           <literal>block-device</literal>
  *           (of type <link linkend="G-VARIANT-TYPE-UINT64:CAPS">'t'</link>) that is the #dev_t
  *           for the mounted device,
+ *           <literal>filesystem-uuid</literal>
+ *           (of type <link linkend="G-VARIANT-TYPE-STRING:CAPS">'t'</link>) that is the UUID
+ *           for the mounted filesystem,
  *           <literal>mounted-by-uid</literal>
  *           (of type <link linkend="G-VARIANT-TYPE-UINT32:CAPS">'u'</link>) that is the #uid_t
  *           of the user who mounted the device, and
@@ -171,6 +174,11 @@
 #define UDISKS_STATE_FILE_LOOP                   "loop"
 #define UDISKS_STATE_FILE_MDRAID                 "mdraid"
 #define UDISKS_STATE_FILE_MODULES                "modules"
+/* Key names */
+#define UDISKS_STATE_KEY_BLOCK_DEVICE            "block-device"
+#define UDISKS_STATE_KEY_FS_UUID                 "filesystem-uuid"
+#define UDISKS_STATE_KEY_MOUNTED_BY_UID          "mounted-by-uid"
+#define UDISKS_STATE_KEY_FSTAB_MOUNT             "fstab-mount"
 
 /**
  * UDisksState:
@@ -211,7 +219,8 @@ static void      udisks_state_check_in_thread     (UDisksState          *state);
 static void      udisks_state_check_mounted_fs    (UDisksState          *state,
                                                    const gchar          *key,
                                                    GArray               *devs_to_clean,
-                                                   dev_t                 match_block_device);
+                                                   dev_t                 match_block_device,
+                                                   const gchar          *match_fs_uuid);
 static void      udisks_state_check_unlocked_crypto_dev (UDisksState          *state,
                                                          gboolean              check_only,
                                                          GArray               *devs_to_clean);
@@ -447,11 +456,13 @@ udisks_state_check_block (UDisksState   *state,
   udisks_state_check_mounted_fs (state,
                                  UDISKS_STATE_FILE_MOUNTED_FS,
                                  NULL,
-                                 block_device);
+                                 block_device,
+                                 NULL);
   udisks_state_check_mounted_fs (state,
                                  UDISKS_STATE_FILE_MOUNTED_FS_PERSISTENT,
                                  NULL,
-                                 block_device);
+                                 block_device,
+                                 NULL);
 
   g_mutex_unlock (&state->lock);
 }
@@ -508,11 +519,11 @@ udisks_state_check_in_thread (UDisksState *state)
   udisks_state_check_mounted_fs (state,
                                  UDISKS_STATE_FILE_MOUNTED_FS,
                                  devs_to_clean,
-                                 0);
+                                 0, NULL);
   udisks_state_check_mounted_fs (state,
                                  UDISKS_STATE_FILE_MOUNTED_FS_PERSISTENT,
                                  devs_to_clean,
-                                 0);
+                                 0, NULL);
 
   /* Then go through all block devices and clear them up
    * ... for real this time
@@ -574,13 +585,16 @@ static gboolean
 udisks_state_check_mounted_fs_entry (UDisksState  *state,
                                      GVariant     *value,
                                      GArray       *devs_to_clean,
-                                     dev_t         match_block_device)
+                                     dev_t         match_block_device,
+                                     const gchar  *match_fs_uuid)
 {
   const gchar *mount_point_str;
   gchar mount_point[PATH_MAX] = { '\0', };
   GVariant *details;
   GVariant *block_device_value;
   dev_t block_device = 0;
+  GVariant *fs_uuid_value;
+  const gchar *fs_uuid = NULL;
   GVariant *fstab_mount_value;
   gboolean fstab_mount;
   gboolean keep;
@@ -592,7 +606,7 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
   gboolean device_to_be_cleaned;
   UDisksMountMonitor *monitor;
   GUdevClient *udev_client;
-  GUdevDevice *udev_device;
+  GUdevDevice *udev_device = NULL;
   guint n;
   gchar *change_sysfs_path = NULL;
   UDisksObject *block_object = NULL;
@@ -615,24 +629,31 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
                  &mount_point_str,
                  &details);
 
-  block_device_value = lookup_asv (details, "block-device");
-  if (block_device_value == NULL)
+  block_device_value = lookup_asv (details, UDISKS_STATE_KEY_BLOCK_DEVICE);
+  fs_uuid_value = lookup_asv (details, UDISKS_STATE_KEY_FS_UUID);
+  if (block_device_value == NULL && fs_uuid_value == NULL)
     {
       s = g_variant_print (value, TRUE);
-      udisks_critical ("udisks_state_check_mounted_fs_entry: mounted-fs entry %s is invalid: no block-device key/value pair", s);
+      udisks_critical ("udisks_state_check_mounted_fs_entry: mounted-fs entry %s is invalid: no block-device or filesystem UUID key/value pair", s);
       g_free (s);
       goto out;
     }
-  block_device = g_variant_get_uint64 (block_device_value);
+  if (block_device_value != NULL)
+    block_device = g_variant_get_uint64 (block_device_value);
+  if (fs_uuid_value != NULL)
+    fs_uuid = g_variant_get_string (fs_uuid_value, NULL);
 
-  if (match_block_device != 0 && match_block_device != block_device)
+  if ((match_block_device != 0 && match_block_device != block_device) ||
+      (match_fs_uuid != NULL && g_strcmp0 (match_fs_uuid, fs_uuid) != 0))
     {
       /* not intended for this block device, continue with parent iteration */
       keep = TRUE;
       goto out;
     }
 
-  block_object = udisks_daemon_find_block (state->daemon, block_device);
+  if (block_device != 0)
+    block_object = udisks_daemon_find_block (state->daemon, block_device);
+  /* TODO: in case of a volume-based mount, find all related block devices and lock them */
   /* skip locking if called from udisks_state_check_block() */
   if (block_object != NULL && match_block_device == 0)
     {
@@ -655,7 +676,7 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
       udisks_critical ("udisks_state_check_mounted_fs_entry: mountpoint %s is invalid, cannot recover the canonical path ", mount_point_str);
     }
 
-  fstab_mount_value = lookup_asv (details, "fstab-mount");
+  fstab_mount_value = lookup_asv (details, UDISKS_STATE_KEY_FSTAB_MOUNT);
   if (fstab_mount_value == NULL)
     {
       s = g_variant_print (value, TRUE);
@@ -668,7 +689,10 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
   /* udisks_debug ("Validating mounted-fs entry for mount point %s", mount_point); */
 
   /* Figure out if still mounted */
-  mounts = udisks_mount_monitor_get_mounts_for_dev (monitor, block_device);
+  if (block_device == 0 && fs_uuid != NULL)
+    mounts = udisks_mount_monitor_get_mounts_for_fs_uuid (monitor, fs_uuid);
+  else
+    mounts = udisks_mount_monitor_get_mounts_for_dev (monitor, block_device);
   for (l = mounts; l != NULL; l = l->next)
     {
       UDisksMount *mount = UDISKS_MOUNT (l->data);
@@ -683,9 +707,19 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
 
   /* Figure out if block device still exists */
   udev_client = udisks_linux_provider_get_udev_client (udisks_daemon_get_linux_provider (state->daemon));
-  udev_device = g_udev_client_query_by_device_number (udev_client,
-                                                      G_UDEV_DEVICE_TYPE_BLOCK,
-                                                      block_device);
+  if (fs_uuid != NULL)
+    {
+      /* TODO: in case of a volume-based mount, find all block related devices and iterate through the list */
+      /* spoof the flags to prevent violent device removal */
+      device_exists = TRUE;
+      device_to_be_cleaned = FALSE;
+    }
+  else
+    {
+      udev_device = g_udev_client_query_by_device_number (udev_client,
+                                                          G_UDEV_DEVICE_TYPE_BLOCK,
+                                                          block_device);
+    }
   if (udev_device != NULL)
     {
       /* If media is pulled from a device with removable media (say,
@@ -738,7 +772,7 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
     }
 
   /* Figure out if the device is about to be cleaned up */
-  if (devs_to_clean != NULL)
+  if (devs_to_clean != NULL && block_device != 0)
     for (n = 0; n < devs_to_clean->len; n++)
       {
         dev_t dev_to_clean = g_array_index (devs_to_clean, dev_t, n);
@@ -768,10 +802,15 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
         }
       else if (!is_mounted)
         {
-          udisks_notice ("Cleaning up mount point %s (device %u:%u is not mounted)",
-                         mount_point, major (block_device), minor (block_device));
+          if (fs_uuid != NULL)
+            udisks_notice ("Cleaning up mount point %s (filesystem UUID %s is not mounted)",
+                           mount_point, fs_uuid);
+          else
+            udisks_notice ("Cleaning up mount point %s (device %u:%u is not mounted)",
+                           mount_point, major (block_device), minor (block_device));
         }
 
+      /* no backing device available anymore */
       if (is_mounted)
         {
           gchar *escaped_mount_point;
@@ -834,6 +873,8 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
     g_variant_unref (fstab_mount_value);
   if (block_device_value != NULL)
     g_variant_unref (block_device_value);
+  if (fs_uuid_value != NULL)
+    g_variant_unref (fs_uuid_value);
   if (details != NULL)
     g_variant_unref (details);
   if (locked)
@@ -850,7 +891,8 @@ static void
 udisks_state_check_mounted_fs (UDisksState *state,
                                const gchar *key,
                                GArray      *devs_to_clean,
-                               dev_t        match_block_device)
+                               dev_t        match_block_device,
+                               const gchar *match_fs_uuid)
 {
   gboolean changed;
   GVariant *value;
@@ -873,7 +915,7 @@ udisks_state_check_mounted_fs (UDisksState *state,
       g_variant_iter_init (&iter, value);
       while ((child = g_variant_iter_next_value (&iter)) != NULL)
         {
-          if (udisks_state_check_mounted_fs_entry (state, child, devs_to_clean, match_block_device))
+          if (udisks_state_check_mounted_fs_entry (state, child, devs_to_clean, match_block_device, match_fs_uuid))
             g_variant_builder_add_value (&builder, child);
           else
             changed = TRUE;
@@ -903,8 +945,9 @@ udisks_state_check_mounted_fs (UDisksState *state,
 /**
  * udisks_state_add_mounted_fs:
  * @state: A #UDisksState.
- * @block_device: The block device.
  * @mount_point: The mount point.
+ * @block_device: The block device or 0 if not applicable.
+ * @fs_uuid: The filesystem UUID or %NULL if not applicable.
  * @uid: The user id of the process requesting the device to be mounted.
  * @fstab_mount: %TRUE if the device was mounted via /etc/fstab.
  * @persistent: %TRUE if the mount point is on a persistent filesystem.
@@ -916,6 +959,7 @@ void
 udisks_state_add_mounted_fs (UDisksState    *state,
                              const gchar    *mount_point,
                              dev_t           block_device,
+                             const gchar    *fs_uuid,
                              uid_t           uid,
                              gboolean        fstab_mount,
                              gboolean        persistent)
@@ -965,17 +1009,28 @@ udisks_state_add_mounted_fs (UDisksState    *state,
 
   /* build the details */
   g_variant_builder_init (&details_builder, G_VARIANT_TYPE ("a{sv}"));
+  if (block_device > 0)
+    {
+      g_variant_builder_add (&details_builder,
+                             "{sv}",
+                             UDISKS_STATE_KEY_BLOCK_DEVICE,
+                             g_variant_new_uint64 (block_device));
+    }
+  if (fs_uuid != NULL)
+    {
+      g_variant_builder_add (&details_builder,
+                             "{sv}",
+                             UDISKS_STATE_KEY_FS_UUID,
+                             g_variant_new_string (fs_uuid));
+      /* TODO: might be worth recording a list of block device numbers associated with this ID_FS_UUID */
+    }
   g_variant_builder_add (&details_builder,
                          "{sv}",
-                         "block-device",
-                         g_variant_new_uint64 (block_device));
-  g_variant_builder_add (&details_builder,
-                         "{sv}",
-                         "mounted-by-uid",
+                         UDISKS_STATE_KEY_MOUNTED_BY_UID,
                          g_variant_new_uint32 (uid));
   g_variant_builder_add (&details_builder,
                          "{sv}",
-                         "fstab-mount",
+                         UDISKS_STATE_KEY_FSTAB_MOUNT,
                          g_variant_new_boolean (fstab_mount));
   details_value = g_variant_builder_end (&details_builder);
 
@@ -1000,6 +1055,7 @@ static gchar *
 find_mounted_fs_for_key (UDisksState   *state,
                          const gchar   *key,
                          dev_t          block_device,
+                         const gchar   *fs_uuid,
                          uid_t         *out_uid,
                          gboolean      *out_fstab_mount)
 {
@@ -1021,56 +1077,84 @@ find_mounted_fs_for_key (UDisksState   *state,
         {
           const gchar *mount_point;
           GVariant *details;
-          GVariant *block_device_value;
+          gboolean match = FALSE;
 
           g_variant_get (child,
                          "{&s@a{sv}}",
                          &mount_point,
                          &details);
 
-          block_device_value = lookup_asv (details, "block-device");
-          if (block_device_value != NULL)
+          /* match by block device number */
+          if (block_device != 0)
             {
-              dev_t iter_block_device;
-              iter_block_device = g_variant_get_uint64 (block_device_value);
-              if (iter_block_device == block_device)
+              GVariant *block_device_value;
+
+              block_device_value = lookup_asv (details, UDISKS_STATE_KEY_BLOCK_DEVICE);
+              if (block_device_value != NULL)
                 {
-                  ret = g_strdup (mount_point);
-                  if (out_uid != NULL)
-                    {
-                      GVariant *lookup_value;
-                      lookup_value = lookup_asv (details, "mounted-by-uid");
-                      *out_uid = 0;
-                      if (lookup_value != NULL)
-                        {
-                          *out_uid = g_variant_get_uint32 (lookup_value);
-                          g_variant_unref (lookup_value);
-                        }
-                    }
-                  if (out_fstab_mount != NULL)
-                    {
-                      GVariant *lookup_value;
-                      lookup_value = lookup_asv (details, "fstab-mount");
-                      *out_fstab_mount = FALSE;
-                      if (lookup_value != NULL)
-                        {
-                          *out_fstab_mount = g_variant_get_boolean (lookup_value);
-                          g_variant_unref (lookup_value);
-                        }
-                    }
+                  dev_t iter_block_device;
+
+                  iter_block_device = g_variant_get_uint64 (block_device_value);
+                  if (iter_block_device == block_device)
+                    match = TRUE;
                   g_variant_unref (block_device_value);
-                  g_variant_unref (details);
-                  g_variant_unref (child);
-                  goto out;
                 }
-              g_variant_unref (block_device_value);
             }
+
+          /* match by filesystem UUID */
+          if (!match && fs_uuid != NULL)
+            {
+              GVariant *fs_uuid_value;
+
+              fs_uuid_value = lookup_asv (details, UDISKS_STATE_KEY_FS_UUID);
+              if (fs_uuid_value != NULL)
+                {
+                  const gchar *iter_fs_uuid;
+
+                  iter_fs_uuid = g_variant_get_string (fs_uuid_value, NULL);
+                  if (g_strcmp0 (fs_uuid, iter_fs_uuid) == 0)
+                    match = TRUE;
+                  g_variant_unref (fs_uuid_value);
+                }
+            }
+
+          /* retrieve additional attributes */
+          if (match)
+            {
+              ret = g_strdup (mount_point);
+              if (out_uid != NULL)
+                {
+                  GVariant *lookup_value;
+
+                  *out_uid = 0;
+                  lookup_value = lookup_asv (details, UDISKS_STATE_KEY_MOUNTED_BY_UID);
+                  if (lookup_value != NULL)
+                    {
+                      *out_uid = g_variant_get_uint32 (lookup_value);
+                      g_variant_unref (lookup_value);
+                    }
+                }
+              if (out_fstab_mount != NULL)
+                {
+                  GVariant *lookup_value;
+
+                  *out_fstab_mount = FALSE;
+                  lookup_value = lookup_asv (details, UDISKS_STATE_KEY_FSTAB_MOUNT);
+                  if (lookup_value != NULL)
+                    {
+                      *out_fstab_mount = g_variant_get_boolean (lookup_value);
+                      g_variant_unref (lookup_value);
+                    }
+                }
+            }
+
           g_variant_unref (details);
           g_variant_unref (child);
+          if (match)
+            break;
         }
     }
 
- out:
   if (value != NULL)
     g_variant_unref (value);
   return ret;
@@ -1079,11 +1163,12 @@ find_mounted_fs_for_key (UDisksState   *state,
 /**
  * udisks_state_find_mounted_fs:
  * @state: A #UDisksState.
- * @block_device: The block device.
+ * @block_device: The block device or 0 if not applicable.
+ * @fs_uuid: The filesystem UUID or %NULL if not applicable.
  * @out_uid: Return location for the user id who mounted the device or %NULL.
  * @out_fstab_mount: Return location for whether the device was a fstab mount or %NULL.
  *
- * Gets the mount point for @block_device, if it exists in the
+ * Gets the mount point for @block_device or @fs_uuid, if it exists in the
  * <filename>/run/udisks2/mounted-fs</filename> file.
  *
  * Returns: The mount point for @block_device or %NULL if not found.
@@ -1091,6 +1176,7 @@ find_mounted_fs_for_key (UDisksState   *state,
 gchar *
 udisks_state_find_mounted_fs (UDisksState   *state,
                               dev_t          block_device,
+                              const gchar   *fs_uuid,
                               uid_t         *out_uid,
                               gboolean      *out_fstab_mount)
 {
@@ -1103,12 +1189,14 @@ udisks_state_find_mounted_fs (UDisksState   *state,
   ret = find_mounted_fs_for_key (state,
                                  UDISKS_STATE_FILE_MOUNTED_FS,
                                  block_device,
+                                 fs_uuid,
                                  out_uid,
                                  out_fstab_mount);
   if (ret == NULL)
     ret = find_mounted_fs_for_key (state,
                                    UDISKS_STATE_FILE_MOUNTED_FS_PERSISTENT,
                                    block_device,
+                                   fs_uuid,
                                    out_uid,
                                    out_fstab_mount);
 

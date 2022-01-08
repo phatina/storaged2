@@ -47,6 +47,7 @@ struct _UDisksMount
   GObject parent_instance;
 
   gchar *mount_path;
+  gchar *fs_uuid;
   dev_t dev;
   UDisksMountType type;
 };
@@ -66,6 +67,7 @@ udisks_mount_finalize (GObject *object)
   UDisksMount *mount = UDISKS_MOUNT (object);
 
   g_free (mount->mount_path);
+  g_free (mount->fs_uuid);
 
   if (G_OBJECT_CLASS (udisks_mount_parent_class)->finalize)
     G_OBJECT_CLASS (udisks_mount_parent_class)->finalize (object);
@@ -88,6 +90,7 @@ udisks_mount_class_init (UDisksMountClass *klass)
 UDisksMount *
 _udisks_mount_new (dev_t            dev,
                    const gchar     *mount_path,
+                   const gchar     *fs_uuid,
                    UDisksMountType  type)
 {
   UDisksMount *mount;
@@ -95,6 +98,7 @@ _udisks_mount_new (dev_t            dev,
   mount = UDISKS_MOUNT (g_object_new (UDISKS_TYPE_MOUNT, NULL));
   mount->dev = dev;
   mount->mount_path = g_strdup (mount_path);
+  mount->fs_uuid = g_strdup (fs_uuid);
   mount->type = type;
 
   return mount;
@@ -116,6 +120,24 @@ udisks_mount_get_mount_path (UDisksMount *mount)
   g_return_val_if_fail (UDISKS_IS_MOUNT (mount), NULL);
   g_return_val_if_fail (mount->type == UDISKS_MOUNT_TYPE_FILESYSTEM, NULL);
   return mount->mount_path;
+}
+
+/**
+ * udisks_mount_get_fs_uuid:
+ * @mount: A #UDisksMount
+ *
+ * Gets the filesystem UUID for a #UDISKS_MOUNT_TYPE_FILESYSTEM<!-- -->-type mount.
+ *
+ * It is a programming error to call this on any other type of #UDisksMount.
+ *
+ * Returns: A string owned by @mount. Do not free.
+ */
+const gchar *
+udisks_mount_get_fs_uuid (UDisksMount *mount)
+{
+  g_return_val_if_fail (UDISKS_IS_MOUNT (mount), NULL);
+  g_return_val_if_fail (mount->type == UDISKS_MOUNT_TYPE_FILESYSTEM, NULL);
+  return mount->fs_uuid;
 }
 
 /**
@@ -152,6 +174,10 @@ udisks_mount_compare (UDisksMount  *mount,
   g_return_val_if_fail (UDISKS_IS_MOUNT (other_mount), 0);
 
   ret = g_strcmp0 (mount->mount_path, other_mount->mount_path);
+  if (ret != 0)
+    goto out;
+
+  ret = g_strcmp0 (mount->fs_uuid, other_mount->fs_uuid);
   if (ret != 0)
     goto out;
 

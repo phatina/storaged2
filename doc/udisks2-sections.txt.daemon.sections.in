@@ -212,10 +212,12 @@ UDisksMountType
 udisks_mount_get_dev
 udisks_mount_get_mount_type
 udisks_mount_get_mount_path
+udisks_mount_get_fs_uuid
 udisks_mount_compare
 UDisksMountMonitor
 udisks_mount_monitor_new
 udisks_mount_monitor_get_mounts_for_dev
+udisks_mount_monitor_get_mounts_for_fs_uuid
 udisks_mount_monitor_is_dev_in_use
 <SUBSECTION Standard>
 UDISKS_TYPE_MOUNT
@@ -358,6 +360,8 @@ udisks_linux_block_get_type
 UDisksLinuxFilesystem
 udisks_linux_filesystem_new
 udisks_linux_filesystem_update
+udisks_linux_filesystem_is_volume_based
+udisks_linux_filesystem_find_siblings
 <SUBSECTION Standard>
 UDISKS_LINUX_FILESYSTEM
 UDISKS_IS_LINUX_FILESYSTEM

@@ -30,6 +30,7 @@ G_BEGIN_DECLS
 
 UDisksMount *_udisks_mount_new (dev_t dev,
                                 const gchar *mount_path,
+                                const gchar *fs_uuid,
                                 UDisksMountType type);
 
 UDisksFstabEntry *_udisks_fstab_entry_new (const struct mntent *mntent);

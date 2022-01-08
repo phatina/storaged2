@@ -417,7 +417,7 @@ udisks_daemon_constructed (GObject *object)
       daemon->module_manager = udisks_module_manager_new_uninstalled (daemon);
     }
 
-  daemon->mount_monitor = udisks_mount_monitor_new ();
+  daemon->mount_monitor = udisks_mount_monitor_new (daemon);
 
   daemon->state = udisks_state_new (daemon);
 

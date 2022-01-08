@@ -29,15 +29,17 @@ G_BEGIN_DECLS
 #define UDISKS_MOUNT_MONITOR(o)           (G_TYPE_CHECK_INSTANCE_CAST ((o), UDISKS_TYPE_MOUNT_MONITOR, UDisksMountMonitor))
 #define UDISKS_IS_MOUNT_MONITOR(o)        (G_TYPE_CHECK_INSTANCE_TYPE ((o), UDISKS_TYPE_MOUNT_MONITOR))
 
-GType                udisks_mount_monitor_get_type           (void) G_GNUC_CONST;
-UDisksMountMonitor  *udisks_mount_monitor_new                (void);
-GList               *udisks_mount_monitor_get_mounts_for_dev (UDisksMountMonitor  *monitor,
-                                                              dev_t                dev);
-gboolean             udisks_mount_monitor_is_dev_in_use      (UDisksMountMonitor  *monitor,
-                                                              dev_t                dev,
-                                                              UDisksMountType     *out_type);
-UDisksMount         *udisks_mount_monitor_get_mount_for_path (UDisksMountMonitor  *monitor,
-                                                              const gchar         *mount_path);
+GType                udisks_mount_monitor_get_type               (void) G_GNUC_CONST;
+UDisksMountMonitor  *udisks_mount_monitor_new                    (UDisksDaemon        *daemon);
+GList               *udisks_mount_monitor_get_mounts_for_dev     (UDisksMountMonitor  *monitor,
+                                                                  dev_t                dev);
+GList               *udisks_mount_monitor_get_mounts_for_fs_uuid (UDisksMountMonitor  *monitor,
+                                                                  const gchar         *fs_uuid);
+gboolean             udisks_mount_monitor_is_dev_in_use          (UDisksMountMonitor  *monitor,
+                                                                  dev_t                dev,
+                                                                  UDisksMountType     *out_type);
+UDisksMount         *udisks_mount_monitor_get_mount_for_path     (UDisksMountMonitor  *monitor,
+                                                                  const gchar         *mount_path);
 
 G_END_DECLS
 
