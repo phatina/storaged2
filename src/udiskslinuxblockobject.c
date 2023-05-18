@@ -1079,12 +1079,57 @@ gboolean
 udisks_linux_block_object_reread_partition_table (UDisksLinuxBlockObject  *object,
                                                   GError                 **error)
 {
-  UDisksLinuxDevice *device;
-  const gchar *device_file;
-  gint fd;
+  int fd;
   gboolean ret = TRUE;
 
   g_return_val_if_fail (UDISKS_IS_LINUX_BLOCK_OBJECT (object), FALSE);
+  g_warn_if_fail (!error || !*error);
+
+  fd = udisks_linux_block_object_acquire_bsd_lock (object, TRUE, error);
+  if (fd < 0)
+    return FALSE;
+
+  if (ioctl (fd, BLKRRPART) != 0)
+    {
+      gchar *device_file;
+
+      device_file = udisks_linux_block_object_get_device_file (object);
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
+                   "Error re-reading partition table (BLKRRPART ioctl) on %s: %m",
+                   device_file);
+      g_free (device_file);
+      ret = FALSE;
+    }
+
+  close (fd);
+
+  return ret;
+}
+
+/* ---------------------------------------------------------------------------------------------------- */
+
+/**
+ * udisks_linux_block_object_acquire_bsd_lock:
+ * @object: A #UDisksLinuxBlockObject.
+ * @exclusive: %TRUE for an exclusive lock, %FALSE for a shared one.
+ * @error: Return location for error.
+ *
+ * Attempts to acquire exclusive or shared BSD lock. Makes five attempts
+ * with 100ms delay when busy. See https://systemd.io/BLOCK_DEVICE_LOCKING/
+ * for further details.
+ *
+ * Returns: File descriptor number of an open block device or %-1 on failure
+ *          with @error set. Release the lock with close().
+ */
+int
+udisks_linux_block_object_acquire_bsd_lock (UDisksLinuxBlockObject *object, gboolean exclusive, GError **error)
+{
+  UDisksLinuxDevice *device;
+  const gchar *device_file;
+  gint fd;
+  gint num_tries = 0;
+
+  g_return_val_if_fail (UDISKS_IS_LINUX_BLOCK_OBJECT (object), -1);
   g_warn_if_fail (!error || !*error);
 
   device = udisks_linux_block_object_get_device (object);
@@ -1093,34 +1138,25 @@ udisks_linux_block_object_reread_partition_table (UDisksLinuxBlockObject  *objec
   if (fd == -1)
     {
       g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
-                   "Error opening %s while re-reading partition table: %m", device_file);
-      ret = FALSE;
+                   "Error opening %s while acquiring a BSD lock: %m", device_file);
     }
   else
     {
-      gint num_tries = 0;
-
-      /* acquire an exclusive BSD lock to prevent udev probes.
-       * See also https://systemd.io/BLOCK_DEVICE_LOCKING
-       */
-      while (flock (fd, LOCK_EX | LOCK_NB) != 0)
+      while (flock (fd, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0)
         {
           g_usleep (100 * 1000); /* microseconds */
           if (num_tries++ > 5)
-            break;
+            {
+              udisks_debug ("Failed to acquire %s BSD lock on %s: %m",
+                            exclusive ? "exclusive" : "shared",
+                            device_file);
+              break;
+            }
         }
-
-      if (ioctl (fd, BLKRRPART) != 0)
-        {
-          g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
-                       "Error re-reading partition table (BLKRRPART ioctl) on %s: %m", device_file);
-          ret = FALSE;
-        }
-      close (fd);
     }
 
   g_object_unref (device);
-  return ret;
+  return fd;
 }
 
 /* ---------------------------------------------------------------------------------------------------- */

@@ -318,6 +318,34 @@ class UdisksBaseTest(udiskstestcase.UdisksTestCase):
         self.assertEqual(len(devices), 1)
         self.assertIn(object_path, devices)
 
+        # create a partition on another device
+        disk = self.get_object('/block_devices/' + os.path.basename(self.vdevs[2]))
+        self.assertIsNotNone(disk)
+        disk.Format('gpt', self.no_options, dbus_interface=self.iface_prefix + '.Block')
+        self.addCleanup(self._wipe, self.vdevs[2])
+        part_label = 'PRTLBLX'
+        path = disk.CreatePartition(dbus.UInt64(1024**2), dbus.UInt64(100 * 1024**2),
+                                    '', part_label, self.no_options,
+                                    dbus_interface=self.iface_prefix + '.PartitionTable')
+        part = self.bus.get_object(self.iface_prefix, path)
+        self.assertIsNotNone(part)
+        part_uuid = self.get_property_raw(part, '.Partition', 'UUID')
+        self.assertIsNotNone(part_uuid)
+        part_name_val = self.get_property_raw(part, '.Partition', 'Name')
+        self.assertEquals(part_name_val, part_label)
+
+        # check that partlabel and partuuid can be resolved
+        spec = dbus.Dictionary({'partlabel': part_label}, signature='sv')
+        devices = manager.ResolveDevice(spec, self.no_options)
+        object_path = '%s/block_devices/%s1' % (self.path_prefix, os.path.basename(self.vdevs[2]))
+        self.assertEqual(len(devices), 1)
+        self.assertIn(object_path, devices)
+        spec = dbus.Dictionary({'partuuid': part_uuid}, signature='sv')
+        devices = manager.ResolveDevice(spec, self.no_options)
+        object_path = '%s/block_devices/%s1' % (self.path_prefix, os.path.basename(self.vdevs[2]))
+        self.assertEqual(len(devices), 1)
+        self.assertIn(object_path, devices)
+
     def test_80_device_presence(self):
         '''Test the debug devices are present on the bus'''
         for d in self.vdevs:

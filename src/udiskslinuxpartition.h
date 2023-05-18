@@ -36,6 +36,7 @@ void             udisks_linux_partition_update   (UDisksLinuxPartition   *partit
 
 gboolean         udisks_linux_partition_set_type_sync (UDisksLinuxPartition  *partition,
                                                        const gchar           *type,
+                                                       gboolean               lock_held,
                                                        uid_t                  caller_uid,
                                                        GCancellable          *cancellable,
                                                        GError               **error);

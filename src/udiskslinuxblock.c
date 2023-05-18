@@ -3240,6 +3240,7 @@ format_set_partition_type (UDisksPartition       *partition,
     {
       if (!udisks_linux_partition_set_type_sync (UDISKS_LINUX_PARTITION (partition),
                                                  partition_type,
+                                                 TRUE, /* lock_held */
                                                  caller_uid,
                                                  NULL, /* cancellable */
                                                  error))
@@ -3604,21 +3605,32 @@ udisks_linux_block_handle_format (UDisksBlock             *block,
   /* The mkfs program may not generate all the uevents we need - so explicitly
    * trigger an event here
    */
-  if (fs_features && (fs_features->features & BD_FS_FEATURE_PARTITION_TABLE) == BD_FS_FEATURE_PARTITION_TABLE &&
-      !udisks_linux_block_object_reread_partition_table (UDISKS_LINUX_BLOCK_OBJECT (object), &error))
+  if (fs_features && (fs_features->features & BD_FS_FEATURE_PARTITION_TABLE) == BD_FS_FEATURE_PARTITION_TABLE)
     {
-      udisks_warning ("%s", error->message);
-      g_clear_error (&error);
+      UDisksObject *partition_table_object;
+
+      /* If formatting a partition, re-read partition table on a parent device */
+      if (partition != NULL)
+        partition_table_object = udisks_daemon_find_object (daemon, udisks_partition_get_table (partition));
+      else
+        partition_table_object = g_object_ref (object);
+
+      if (partition_table_object != NULL)
+        {
+          if (!udisks_linux_block_object_reread_partition_table (UDISKS_LINUX_BLOCK_OBJECT (partition_table_object), &error))
+            {
+              udisks_warning ("%s", error->message);
+              g_clear_error (&error);
+            }
+          if (partition_table_object != object)
+            udisks_linux_block_object_trigger_uevent_sync (UDISKS_LINUX_BLOCK_OBJECT (partition_table_object),
+                                                           UDISKS_DEFAULT_WAIT_TIMEOUT);
+          trigger_uevent_on_nested_partitions (daemon, UDISKS_LINUX_BLOCK_OBJECT (partition_table_object));
+          g_object_unref (partition_table_object);
+        }
     }
   udisks_linux_block_object_trigger_uevent_sync (UDISKS_LINUX_BLOCK_OBJECT (object_to_mkfs),
                                                  UDISKS_DEFAULT_WAIT_TIMEOUT);
-
-  /* In case a protective partition table was potentially created, trigger uevents
-   * on all nested partitions. */
-  if (fs_features && (fs_features->features & BD_FS_FEATURE_PARTITION_TABLE) == BD_FS_FEATURE_PARTITION_TABLE)
-    {
-      trigger_uevent_on_nested_partitions (daemon, UDISKS_LINUX_BLOCK_OBJECT (object));
-    }
 
   /* Wait for the desired filesystem interface */
   wait_data.object = object_to_mkfs;

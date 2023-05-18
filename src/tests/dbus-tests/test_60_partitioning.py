@@ -17,9 +17,7 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         try:
             device.Format('empty', d, dbus_interface=self.iface_prefix + '.Block')
         except dbus.exceptions.DBusException:
-            self.udev_settle()
-            time.sleep(5)
-            device.Format('empty', d, dbus_interface=self.iface_prefix + '.Block')
+            pass
 
     def _create_format(self, device, ftype):
         device.Format(ftype, self.no_options, dbus_interface=self.iface_prefix + '.Block')
@@ -28,9 +26,7 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         try:
             part.Delete(self.no_options, dbus_interface=self.iface_prefix + '.Partition')
         except dbus.exceptions.DBusException:
-            self.udev_settle()
-            time.sleep(5)
-            part.Delete(self.no_options, dbus_interface=self.iface_prefix + '.Partition')
+            pass
 
     def test_create_mbr_partition(self):
         disk = self.get_object('/block_devices/' + os.path.basename(self.vdevs[0]))
@@ -39,6 +35,7 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         # create msdos partition table
         self._create_format(disk, 'dos')
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         pttype = self.get_property(disk, '.PartitionTable', 'Type')
         pttype.assertEqual('dos')
@@ -55,7 +52,6 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         # create partition
         path1 = disk.CreatePartition(dbus.UInt64(1024**2), dbus.UInt64(100 * 1024**2), part_type, '',
                                      self.no_options, dbus_interface=self.iface_prefix + '.PartitionTable')
-        self.udev_settle()
 
         part = self.bus.get_object(self.iface_prefix, path1)
         self.assertIsNotNone(part)
@@ -103,7 +99,6 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         # create another partition
         path2 = disk.CreatePartition(dbus.UInt64(1024**2 + (1024**2 + 100 * 1024**2)), dbus.UInt64(100 * 1024**2),
                                      part_type, '', self.no_options, dbus_interface=self.iface_prefix + '.PartitionTable')
-        self.udev_settle()
 
         part = self.bus.get_object(self.iface_prefix, path2)
         self.assertIsNotNone(part)
@@ -113,7 +108,6 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         # create yet another partition
         path3 = disk.CreatePartition(dbus.UInt64(1024**2 + 2 * (1024**2 + 100 * 1024**2)), dbus.UInt64(100 * 1024**2),
                                      part_type, '', self.no_options, dbus_interface=self.iface_prefix + '.PartitionTable')
-        self.udev_settle()
 
         part = self.bus.get_object(self.iface_prefix, path3)
         self.assertIsNotNone(part)
@@ -136,11 +130,11 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         # create msdos partition table
         self._create_format(disk, 'dos')
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         # create extended partition
         ext_path = disk.CreatePartition(dbus.UInt64(1024**2), dbus.UInt64(150 * 1024**2), part_type, '',
                                         ext_options, dbus_interface=self.iface_prefix + '.PartitionTable')
-        self.udev_settle()
 
         ext_part = self.bus.get_object(self.iface_prefix, ext_path)
         self.assertIsNotNone(ext_part)
@@ -163,7 +157,6 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         # create logical partition
         log_path = disk.CreatePartition(dbus.UInt64(1024**2), dbus.UInt64(50 * 1024**2), '', '',
                                         log_options, dbus_interface=self.iface_prefix + '.PartitionTable')
-        self.udev_settle()
 
         log_part = self.bus.get_object(self.iface_prefix, log_path)
         self.assertIsNotNone(log_part)
@@ -180,7 +173,6 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         # create one more logical partition
         log_path2 = disk.CreatePartition(dbus.UInt64(dbus_offset.value + dbus_size.value), dbus.UInt64(50 * 1024**2), '', '',
                                          log_options, dbus_interface=self.iface_prefix + '.PartitionTable')
-        self.udev_settle()
 
         log_part2 = self.bus.get_object(self.iface_prefix, log_path2)
         self.assertIsNotNone(log_part2)
@@ -202,6 +194,7 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         # create msdos partition table
         self._create_format(disk, 'dos')
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         options = dbus.Dictionary({'partition-type': 'primary'}, signature='sv')
         offset = 1024**2
@@ -210,7 +203,6 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
             # create primary partition
             path = disk.CreatePartition(dbus.UInt64(offset + i * (offset + size)), dbus.UInt64(size), '', '',
                                             options, dbus_interface=self.iface_prefix + '.PartitionTable')
-            self.udev_settle()
 
             part = self.bus.get_object(self.iface_prefix, path)
             self.assertIsNotNone(part)
@@ -232,6 +224,7 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         pttype.assertEqual('gpt')
 
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         gpt_name = 'home'
         gpt_type = '933ac7e1-2eb4-4f13-b844-0e14e2aef915'
@@ -241,7 +234,6 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
                                     gpt_type, gpt_name,
                                     self.no_options, dbus_interface=self.iface_prefix + '.PartitionTable')
 
-        self.udev_settle()
         part = self.bus.get_object(self.iface_prefix, path)
         self.assertIsNotNone(part)
 
@@ -290,6 +282,7 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         self._create_format(disk, 'dos')
 
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         # create partition with ext4 format
         path = disk.CreatePartitionAndFormat(dbus.UInt64(1024**2), dbus.UInt64(100 * 1024**2), '', '',
@@ -345,6 +338,7 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         self._create_format(disk, 'dos')
 
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         # create partition with udf format and automatically set partition type
         # it should be 0x07
@@ -376,10 +370,11 @@ class UdisksPartitionTableTest(udiskstestcase.UdisksTestCase):
         disk = self.get_object('/block_devices/' + os.path.basename(self.vdevs[0]))
         self.assertIsNotNone(disk)
 
-        # create msdos partition table
+        # create gpt partition table
         self._create_format(disk, 'gpt')
 
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         # create partition with udf format and automatically set partition type
         # it should be ebd0a0a2-b9e5-4433-87c0-68b6b72699c7
@@ -414,9 +409,7 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
         try:
             device.Format('empty', d, dbus_interface=self.iface_prefix + '.Block')
         except dbus.exceptions.DBusException:
-            self.udev_settle()
-            time.sleep(5)
-            device.Format('empty', d, dbus_interface=self.iface_prefix + '.Block')
+            pass
 
     def _create_format(self, device, ftype):
         device.Format(ftype, self.no_options, dbus_interface=self.iface_prefix + '.Block')
@@ -425,9 +418,7 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
         try:
             part.Delete(self.no_options, dbus_interface=self.iface_prefix + '.Partition')
         except dbus.exceptions.DBusException:
-            self.udev_settle()
-            time.sleep(5)
-            part.Delete(self.no_options, dbus_interface=self.iface_prefix + '.Partition')
+            pass
 
     def _create_partition(self, disk, start=1024**2, size=100 * 1024**2, fmt='ext4', type=''):
         if fmt:
@@ -439,7 +430,6 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
                                         self.no_options,
                                         dbus_interface=self.iface_prefix + '.PartitionTable')
 
-        self.udev_settle()
         part = self.bus.get_object(self.iface_prefix, path)
         self.assertIsNotNone(part)
 
@@ -451,13 +441,12 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
 
         self._create_format(disk, 'dos')
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         part = self._create_partition(disk)
         path = str(part.object_path)
 
         part.Delete(self.no_options, dbus_interface=self.iface_prefix + '.Partition')
-
-        self.udev_settle()
 
         part_name = path.split('/')[-1]
         disk_name = os.path.basename(self.vdevs[0])
@@ -481,6 +470,7 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
 
         self._create_format(disk, 'dos')
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         part = self._create_partition(disk)
         self.addCleanup(self._remove_partition, part)
@@ -491,7 +481,6 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
         # set boot flag (10000000(2), 128(10), 0x80(16))
         part.SetFlags(dbus.UInt64(128), self.no_options,
                       dbus_interface=self.iface_prefix + '.Partition')
-        self.udev_settle()
 
         # test flags value on types
         dbus_flags = self.get_property(part, '.Partition', 'Flags')
@@ -510,6 +499,7 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
 
         self._create_format(disk, 'gpt')
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         part = self._create_partition(disk, fmt=False, type=esp_guid)
         self.addCleanup(self._remove_partition, part)
@@ -531,7 +521,6 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
         # set legacy BIOS bootable flag (100(2), 4(10), 0x4(16))
         part.SetFlags(dbus.UInt64(4), self.no_options,
                       dbus_interface=self.iface_prefix + '.Partition')
-        self.udev_settle()
 
         # test flags value on types
         dbus_flags = self.get_property(part, '.Partition', 'Flags')
@@ -555,6 +544,7 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
 
         self._create_format(disk, 'gpt')
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         part = self._create_partition(disk)
         self.addCleanup(self._remove_partition, part)
@@ -572,7 +562,6 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
         home_guid = '933ac7e1-2eb4-4f13-b844-0e14e2aef915'
         part.SetType(home_guid, self.no_options,
                      dbus_interface=self.iface_prefix + '.Partition')
-        self.udev_settle()
 
         # test flags value on types
         dbus_type = self.get_property(part, '.Partition', 'Type')
@@ -589,6 +578,7 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
 
         self._create_format(disk, 'dos')
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         part = self._create_partition(disk)
         self.addCleanup(self._remove_partition, part)
@@ -606,7 +596,6 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
         part_type = '0x8e'   # 'Linux LVM' type, see https://en.wikipedia.org/wiki/Partition_type#PID_8Eh
         part.SetType(part_type, self.no_options,
                      dbus_interface=self.iface_prefix + '.Partition')
-        self.udev_settle()
 
         # test flags value on types
         dbus_type = self.get_property(part, '.Partition', 'Type')
@@ -624,6 +613,7 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
 
         self._create_format(disk, 'gpt')
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         disk_size = self.get_property(disk, '.Block', 'Size')
 
@@ -649,8 +639,6 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
         part.Resize(0, self.no_options,
                     dbus_interface=self.iface_prefix + '.Partition')
 
-        self.udev_settle()
-
         part_offset.assertEqual(initial_offset)
         max_size = part_size.value
         part_size.assertGreater(initial_size)
@@ -660,8 +648,6 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
         part.Resize(new_size, self.no_options,
                     dbus_interface=self.iface_prefix + '.Partition')
 
-        self.udev_settle()
-
         part_offset.assertEqual(initial_offset)
         # resize should guarantee at least the requested size
         part_size.assertGreater(new_size - 1)
@@ -670,8 +656,6 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
         # resize to maximum explicitly
         part.Resize(max_size, self.no_options,
                     dbus_interface=self.iface_prefix + '.Partition')
-
-        self.udev_settle()
 
         part_offset.assertEqual(initial_offset)
         part_size.assertGreater(max_size - 1)
@@ -683,6 +667,7 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
 
         self._create_format(disk, 'gpt')
         self.addCleanup(self._remove_format, disk)
+        self.addCleanup(self.wipe_fs, self.vdevs[0])
 
         part = self._create_partition(disk)
         self.addCleanup(self._remove_partition, part)
@@ -699,8 +684,6 @@ class UdisksPartitionTest(udiskstestcase.UdisksTestCase):
         # set part name
         part.SetName('test', self.no_options,
                      dbus_interface=self.iface_prefix + '.Partition')
-
-        self.udev_settle()
 
         # test flags value on types
         dbus_name = self.get_property(part, '.Partition', 'Name')

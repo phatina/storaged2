@@ -43,6 +43,7 @@
 #include "udiskslinuxblock.h"
 #include "udiskslinuxpartition.h"
 #include "udiskssimplejob.h"
+#include "udisksstate.h"
 
 /**
  * SECTION:udiskslinuxpartitiontable
@@ -248,19 +249,20 @@ wait_for_partition (UDisksDaemon *daemon,
 #define MIB_SIZE (1048576L)
 
 static UDisksObject *
-udisks_linux_partition_table_handle_create_partition (UDisksPartitionTable   *table,
-                                                      GDBusMethodInvocation  *invocation,
-                                                      guint64                 offset,
-                                                      guint64                 size,
-                                                      const gchar            *type,
-                                                      const gchar            *name,
-                                                      GVariant               *options)
+create_partition (UDisksPartitionTable   *table,
+                  GDBusMethodInvocation  *invocation,
+                  guint64                 offset,
+                  guint64                 size,
+                  const gchar            *type,
+                  const gchar            *name,
+                  GVariant               *options)
 {
   const gchar *action_id = NULL;
   const gchar *message = NULL;
   UDisksBlock *block = NULL;
   UDisksObject *object = NULL;
   UDisksDaemon *daemon = NULL;
+  UDisksState *state = NULL;
   gchar *device_name = NULL;
   WaitForPartitionData *wait_data = NULL;
   UDisksObject *partition_object = NULL;
@@ -273,6 +275,7 @@ udisks_linux_partition_table_handle_create_partition (UDisksPartitionTable   *ta
   GError *error = NULL;
   UDisksBaseJob *job = NULL;
   const gchar *partition_type = NULL;
+  int fd = -1;
 
   object = udisks_daemon_util_dup_object (table, &error);
   if (object == NULL)
@@ -282,6 +285,10 @@ udisks_linux_partition_table_handle_create_partition (UDisksPartitionTable   *ta
     }
 
   daemon = udisks_linux_block_object_get_daemon (UDISKS_LINUX_BLOCK_OBJECT (object));
+  state = udisks_daemon_get_state (daemon);
+
+  udisks_linux_block_object_lock_for_cleanup (UDISKS_LINUX_BLOCK_OBJECT (object));
+  udisks_state_check_block (state, udisks_linux_block_object_get_device_number (UDISKS_LINUX_BLOCK_OBJECT (object)));
 
   g_variant_lookup (options, "partition-type", "&s", &partition_type);
 
@@ -331,10 +338,7 @@ udisks_linux_partition_table_handle_create_partition (UDisksPartitionTable   *ta
                                                     invocation))
     goto out;
 
-  device_name = g_strdup (udisks_block_get_device (block));
-
   table_type = udisks_partition_table_dup_type_ (table);
-  wait_data = g_new0 (WaitForPartitionData, 1);
   if (g_strcmp0 (table_type, "dos") == 0)
     {
       char *endp;
@@ -405,6 +409,16 @@ udisks_linux_partition_table_handle_create_partition (UDisksPartitionTable   *ta
       goto out;
     }
 
+  /* Lock the device to prevent udev issuing a BLKRRPART ioctl
+   * call until we're done with changes.
+   */
+  fd = udisks_linux_block_object_acquire_bsd_lock (UDISKS_LINUX_BLOCK_OBJECT (object), TRUE, &error);
+  if (fd < 0)
+    {
+      udisks_warning ("%s", error->message);
+      g_clear_error (&error);
+    }
+
   /* Users might want to specify logical partitions start and size using size of
    * of the extended partition. If this happens we need to shift start (offset)
    * of the logical partition.
@@ -414,6 +428,7 @@ udisks_linux_partition_table_handle_create_partition (UDisksPartitionTable   *ta
    *      use case. But we should definitely provide some functionality to get
    *      right "numbers" and stop doing this.
   */
+  device_name = g_strdup (udisks_block_get_device (block));
   overlapping_part = bd_part_get_part_by_pos (device_name, offset, &error);
   if (overlapping_part != NULL && ! (overlapping_part->type & BD_PART_TYPE_FREESPACE))
     {
@@ -450,7 +465,7 @@ udisks_linux_partition_table_handle_create_partition (UDisksPartitionTable   *ta
                                              UDISKS_ERROR,
                                              UDISKS_ERROR_FAILED,
                                              "Error creating partition on %s: %s",
-                                             udisks_block_get_device (block),
+                                             device_name,
                                              error->message);
       udisks_simple_job_complete (UDISKS_SIMPLE_JOB (job), FALSE, error->message);
       goto out;
@@ -508,12 +523,27 @@ udisks_linux_partition_table_handle_create_partition (UDisksPartitionTable   *ta
         }
     }
 
-  wait_data->ignore_container = (part_spec->type == BD_PART_TYPE_LOGICAL);
-  wait_data->pos_to_wait_for = part_spec->start + (part_spec->size / 2L);
+  /* hard work done, unlock and refresh */
+  if (fd >= 0)
+    {
+      close (fd);
+      fd = -1;
+    }
+
+  if (!udisks_linux_block_object_reread_partition_table (UDISKS_LINUX_BLOCK_OBJECT (object), &error))
+    {
+      udisks_warning ("%s", error->message);
+      g_clear_error (&error);
+    }
+  udisks_linux_block_object_trigger_uevent_sync (UDISKS_LINUX_BLOCK_OBJECT (object),
+                                                 UDISKS_DEFAULT_WAIT_TIMEOUT);
 
   /* sit and wait for the partition to show up */
-  g_warn_if_fail (wait_data->pos_to_wait_for > 0);
+  wait_data = g_new0 (WaitForPartitionData, 1);
   wait_data->partition_table_object = object;
+  wait_data->ignore_container = (part_spec->type == BD_PART_TYPE_LOGICAL);
+  wait_data->pos_to_wait_for = part_spec->start + (part_spec->size / 2L);
+  g_warn_if_fail (wait_data->pos_to_wait_for > 0);
   partition_object = udisks_daemon_wait_for_object_sync (daemon,
                                                          wait_for_partition,
                                                          wait_data,
@@ -537,16 +567,15 @@ udisks_linux_partition_table_handle_create_partition (UDisksPartitionTable   *ta
       goto out;
     }
 
-  /* Trigger uevent on the disk -- we sometimes get add-remove-add uevents for
-     the new partition without getting change event for the disks after the
-     last add event and this breaks the "Partitions" property on the
-     "PartitionTable" interface. */
-  udisks_linux_block_object_trigger_uevent_sync (UDISKS_LINUX_BLOCK_OBJECT (object),
-                                                 UDISKS_DEFAULT_WAIT_TIMEOUT);
-
   udisks_simple_job_complete (UDISKS_SIMPLE_JOB (job), TRUE, NULL);
 
  out:
+  if (fd >= 0)
+    close (fd);
+  if (object != NULL)
+    udisks_linux_block_object_release_cleanup_lock (UDISKS_LINUX_BLOCK_OBJECT (object));
+  if (state != NULL)
+    udisks_state_check (state);
   g_free (table_type);
   g_free (wait_data);
   g_clear_error (&error);
@@ -561,27 +590,6 @@ udisks_linux_partition_table_handle_create_partition (UDisksPartitionTable   *ta
   return partition_object;
 }
 
-static int
-flock_block_dev (UDisksPartitionTable *iface)
-{
-  UDisksObject *object = udisks_daemon_util_dup_object (iface, NULL);
-  UDisksBlock *block = object? udisks_object_peek_block (object) : NULL;
-  int fd = block? open (udisks_block_get_device (block), O_RDONLY) : -1;
-
-  if (fd >= 0)
-    flock (fd, LOCK_SH | LOCK_NB);
-
-  g_clear_object (&object);
-  return fd;
-}
-
-static void
-unflock_block_dev (int fd)
-{
-  if (fd >= 0)
-    close (fd);
-}
-
 /* runs in thread dedicated to handling @invocation */
 static gboolean
 handle_create_partition (UDisksPartitionTable   *table,
@@ -592,41 +600,16 @@ handle_create_partition (UDisksPartitionTable   *table,
                          const gchar            *name,
                          GVariant               *options)
 {
-  /* We (try to) take a shared lock on the partition table while
-     creating and formatting a new partition, here and also in
-     handle_create_partition_and_format.
+  UDisksObject *partition_object;
 
-     This lock prevents udevd from issuing a BLKRRPART ioctl call.
-     That ioctl is undesired because it might temporarily remove the
-     block device of the newly created block device.  It does so only
-     temporarily, but it still happens that the block device is
-     missing exactly when wipefs or mkfs try to access it.
-
-     Also, a pair of remove/add events will cause udisks to create a
-     new internal UDisksObject to represent the block device of the
-     partition.  The code currently doesn't handle this and waits for
-     changes (such as an expected filesystem type or UUID) to a
-     obsolete internal object that will never see them.
-  */
-
-  int fd = flock_block_dev (table);
-  UDisksObject *partition_object =
-    udisks_linux_partition_table_handle_create_partition (table,
-                                                          invocation,
-                                                          offset,
-                                                          size,
-                                                          type,
-                                                          name,
-                                                          options);
-
+  partition_object = create_partition (table, invocation, offset, size, type, name, options);
   if (partition_object)
     {
-      udisks_partition_table_complete_create_partition
-        (table, invocation, g_dbus_object_get_object_path (G_DBUS_OBJECT (partition_object)));
+      udisks_partition_table_complete_create_partition (table,
+                                                        invocation,
+                                                        g_dbus_object_get_object_path (G_DBUS_OBJECT (partition_object)));
       g_object_unref (partition_object);
     }
-
-  unflock_block_dev (fd);
 
   return TRUE; /* returning TRUE means that we handled the method invocation */
 }
@@ -636,16 +619,16 @@ struct FormatCompleteData {
   UDisksPartitionTable *table;
   GDBusMethodInvocation *invocation;
   UDisksObject *partition_object;
-  int lock_fd;
 };
 
 static void
 handle_format_complete (gpointer user_data)
 {
   struct FormatCompleteData *data = user_data;
-  udisks_partition_table_complete_create_partition
-    (data->table, data->invocation, g_dbus_object_get_object_path (G_DBUS_OBJECT (data->partition_object)));
-  unflock_block_dev (data->lock_fd);
+
+  udisks_partition_table_complete_create_partition (data->table,
+                                                    data->invocation,
+                                                    g_dbus_object_get_object_path (G_DBUS_OBJECT (data->partition_object)));
 }
 
 static gboolean
@@ -659,26 +642,15 @@ handle_create_partition_and_format (UDisksPartitionTable   *table,
                                     const gchar            *format_type,
                                     GVariant               *format_options)
 {
-  /* See handle_create_partition for a motivation of taking the lock.
-   */
+  UDisksObject *partition_object;
 
-  int fd = flock_block_dev (table);
-  UDisksObject *partition_object =
-    udisks_linux_partition_table_handle_create_partition (table,
-                                                          invocation,
-                                                          offset,
-                                                          size,
-                                                          type,
-                                                          name,
-                                                          options);
-
+  partition_object = create_partition (table, invocation, offset, size, type, name, options);
   if (partition_object)
     {
       struct FormatCompleteData data;
       data.table = table;
       data.invocation = invocation;
       data.partition_object = partition_object;
-      data.lock_fd = fd;
       udisks_linux_block_handle_format (udisks_object_peek_block (partition_object),
                                         invocation,
                                         format_type,
@@ -686,8 +658,6 @@ handle_create_partition_and_format (UDisksPartitionTable   *table,
                                         handle_format_complete, &data);
       g_object_unref (partition_object);
     }
-  else
-    unflock_block_dev (fd);
 
   return TRUE; /* returning TRUE means that we handled the method invocation */
 }
