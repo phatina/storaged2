@@ -1053,6 +1053,67 @@ udisks_linux_drive_update (UDisksLinuxDrive       *drive,
 
 /* ---------------------------------------------------------------------------------------------------- */
 
+/**
+ * udisks_linux_drive_recalculate_nvme_size:
+ * @drive: A #UDisksLinuxDrive.
+ * @object: The enclosing #UDisksLinuxDriveObject instance.
+ *
+ * Find all block objects pointing to this drive, calculate
+ * NVMe namespace capacity numbers and update this interface.
+ */
+void
+udisks_linux_drive_recalculate_nvme_size (UDisksLinuxDrive       *drive,
+                                          UDisksLinuxDriveObject *object)
+{
+  UDisksDaemon *daemon;
+  GDBusObjectManagerServer *object_manager;
+  GList *objects = NULL;
+  GList *l;
+  const gchar *obj_path;
+  guint64 size_total = 0;
+
+  daemon = udisks_linux_drive_object_get_daemon (object);
+  object_manager = udisks_daemon_get_object_manager (daemon);
+  obj_path = g_dbus_object_get_object_path (G_DBUS_OBJECT (object));
+
+  objects = g_dbus_object_manager_get_objects (G_DBUS_OBJECT_MANAGER (object_manager));
+  for (l = objects; l != NULL; l = l->next)
+    {
+      UDisksObject *o = l->data;
+      UDisksBlock *block;
+      UDisksLinuxDevice *device;
+
+      if (!UDISKS_IS_LINUX_BLOCK_OBJECT (o))
+        continue;
+
+      block = udisks_object_get_block (o);
+      if (!block)
+          continue;
+
+      if (g_strcmp0 (udisks_block_get_drive (block), obj_path) != 0)
+        {
+          g_object_unref (block);
+          continue;
+        }
+
+      device = udisks_linux_block_object_get_device (UDISKS_LINUX_BLOCK_OBJECT (o));
+      if (device && device->nvme_ns_info &&
+          device->nvme_ns_info->current_lba_format.data_size > 0)
+        {
+          /* Namespace Size >= Namespace Capacity >= Namespace Utilization */
+          size_total += (guint64) device->nvme_ns_info->nsize *
+                        (guint64) device->nvme_ns_info->current_lba_format.data_size;
+        }
+      g_clear_object (&device);
+      g_object_unref (block);
+    }
+  g_list_free_full (objects, g_object_unref);
+
+  udisks_drive_set_size (UDISKS_DRIVE (drive), size_total);
+}
+
+/* ---------------------------------------------------------------------------------------------------- */
+
 static gboolean
 handle_eject (UDisksDrive           *_drive,
               GDBusMethodInvocation *invocation,

@@ -34,6 +34,9 @@ UDisksDrive *udisks_linux_drive_new      (void);
 gboolean     udisks_linux_drive_update   (UDisksLinuxDrive       *drive,
                                           UDisksLinuxDriveObject *object);
 
+void         udisks_linux_drive_recalculate_nvme_size (UDisksLinuxDrive       *drive,
+                                                       UDisksLinuxDriveObject *object);
+
 G_END_DECLS
 
 #endif /* __UDISKS_LINUX_DRIVE_H__ */

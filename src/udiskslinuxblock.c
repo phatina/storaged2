@@ -49,6 +49,7 @@
 #include "udiskslinuxblock.h"
 #include "udiskslinuxblockobject.h"
 #include "udiskslinuxdriveobject.h"
+#include "udiskslinuxdrive.h"
 #include "udisksdaemon.h"
 #include "udisksstate.h"
 #include "udisksprivate.h"
@@ -220,19 +221,54 @@ find_block_device_by_sysfs_path (GDBusObjectManagerServer *object_manager,
 
 /* ---------------------------------------------------------------------------------------------------- */
 
-static gchar *
-find_drive (GDBusObjectManagerServer  *object_manager,
-            GUdevDevice               *block_device,
-            UDisksDrive              **out_drive)
+typedef struct
 {
+  UDisksDaemon *daemon;
+  gchar *obj_path;
+} PingDriveData;
+
+static void
+free_ping_drive_data (gpointer user_data)
+{
+  PingDriveData *data = user_data;
+
+  g_free (data->obj_path);
+  g_free (data);
+}
+
+static gboolean
+ping_drive_idle_cb (gpointer user_data)
+{
+  PingDriveData *data = user_data;
+  UDisksObject *object;
+  UDisksDrive *drive;
+
+  object = udisks_daemon_find_object (data->daemon, data->obj_path);
+  drive = object ? udisks_object_get_drive (object) : NULL;
+  if (object && drive)
+    {
+      udisks_linux_drive_recalculate_nvme_size (UDISKS_LINUX_DRIVE (drive),
+                                                UDISKS_LINUX_DRIVE_OBJECT (object));
+    }
+  g_clear_object (&object);
+  g_clear_object (&drive);
+
+  return G_SOURCE_REMOVE;
+}
+
+static gchar *
+find_drive (UDisksDaemon  *daemon,
+            GUdevDevice   *block_device,
+            gboolean       update_size,
+            UDisksDrive  **out_drive)
+{
+  GDBusObjectManagerServer *object_manager;
   GUdevDevice *whole_disk_block_device;
   const gchar *whole_disk_block_device_sysfs_path;
   gchar **nvme_ctrls = NULL;
-  gchar *ret;
+  gchar *ret = NULL;
   GList *objects = NULL;
   GList *l;
-
-  ret = NULL;
 
   if (g_strcmp0 (g_udev_device_get_devtype (block_device), "disk") == 0)
     whole_disk_block_device = g_object_ref (block_device);
@@ -267,6 +303,7 @@ find_drive (GDBusObjectManagerServer  *object_manager,
       g_clear_object (&parent_device);
     }
 
+  object_manager = udisks_daemon_get_object_manager (daemon);
   objects = g_dbus_object_manager_get_objects (G_DBUS_OBJECT_MANAGER (object_manager));
   for (l = objects; l != NULL; l = l->next)
     {
@@ -283,19 +320,48 @@ find_drive (GDBusObjectManagerServer  *object_manager,
           UDisksLinuxDevice *drive_device = UDISKS_LINUX_DEVICE (j->data);
           const gchar *drive_sysfs_path;
 
+          /* See if the drive object encloses our block device.
+           * For NVMe, see if the drive object representing a NVMe controller
+           * provides our namespace.
+           */
           drive_sysfs_path = g_udev_device_get_sysfs_path (drive_device->udev_device);
           if (g_strcmp0 (whole_disk_block_device_sysfs_path, drive_sysfs_path) == 0 ||
               (nvme_ctrls && g_strv_contains ((const gchar * const *) nvme_ctrls, drive_sysfs_path)))
             {
-              if (out_drive != NULL)
-                *out_drive = udisks_object_get_drive (UDISKS_OBJECT (object));
-              ret = g_strdup (g_dbus_object_get_object_path (G_DBUS_OBJECT (object)));
-              g_list_free_full (drive_devices, g_object_unref);
-              /* FIXME: NVMe namespace may be provided by multiple controllers within
-               *  a NVMe subsystem, however the org.freedesktop.UDisks2.Block.Drive
-               *  property may only contain single object path.
+              const gchar *obj_path;
+
+              /* FIXME: An NVMe namespace may be provided by multiple controllers within
+               *        an NVMe subsystem, however the org.freedesktop.UDisks2.Block.Drive
+               *        property may only contain a single object path.
                */
-              goto out;
+              if (out_drive != NULL && *out_drive == NULL)
+                *out_drive = udisks_object_get_drive (UDISKS_OBJECT (object));
+              obj_path = g_dbus_object_get_object_path (G_DBUS_OBJECT (object));
+              if (! ret)
+                ret = g_strdup (obj_path);
+              if (!nvme_ctrls || !update_size)
+                {
+                  g_list_free_full (drive_devices, g_object_unref);
+                  goto out;
+                }
+              else
+                {
+                  if (!udisks_linux_device_nvme_tnvmcap_supported (drive_device))
+                    {
+                      PingDriveData *data;
+
+                      /* ping the drive object to recalculate controller size
+                       * from all attached namespaces
+                       */
+                      data = g_new0 (PingDriveData, 1);
+                      data->daemon = daemon;
+                      data->obj_path = g_strdup (obj_path);
+                      g_idle_add_full (G_PRIORITY_DEFAULT_IDLE,
+                                       ping_drive_idle_cb,
+                                       data,
+                                       free_ping_drive_data);
+                    }
+                }
             }
         }
       g_list_free_full (drive_devices, g_object_unref);
@@ -1135,7 +1201,7 @@ udisks_linux_block_update (UDisksLinuxBlock       *block,
    * TODO: if this is slow we could have a cache or ensure that we
    * only do this once or something else
    */
-  drive_object_path = find_drive (object_manager, device->udev_device, &drive);
+  drive_object_path = find_drive (daemon, device->udev_device, TRUE, &drive);
   if (drive_object_path != NULL)
     {
       udisks_block_set_drive (iface, drive_object_path);
@@ -1986,7 +2052,7 @@ update_block_fstab (UDisksDaemon           *daemon,
 
   /* hints take fstab records in the calculation */
   device = udisks_linux_block_object_get_device (object);
-  drive_object_path = find_drive (udisks_daemon_get_object_manager (daemon), device->udev_device, &drive);
+  drive_object_path = find_drive (daemon, device->udev_device, FALSE, &drive);
   update_hints (daemon, block, device, drive);
   g_free (drive_object_path);
   g_clear_object (&device);

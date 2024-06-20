@@ -463,3 +463,24 @@ udisks_linux_device_nvme_is_fabrics (UDisksLinuxDevice *device)
 
   return FALSE;
 }
+
+/**
+ * udisks_linux_device_nvme_tnvmcap_supported:
+ * @device: A #UDisksLinuxDevice.
+ *
+ * Determines whether @device supports Capacity information
+ * in the Identify Controller data structure.
+ *
+ * Returns: %TRUE if capacity reporting is supported, %FALSE otherwise.
+ */
+gboolean
+udisks_linux_device_nvme_tnvmcap_supported (UDisksLinuxDevice *device)
+{
+  if (device->nvme_ctrl_info == NULL)
+    return FALSE;
+
+  /* FIXME: find a more reliable way to detect controller
+   *        capacity reporting capability.
+   */
+  return device->nvme_ctrl_info->size_total > 0;
+}

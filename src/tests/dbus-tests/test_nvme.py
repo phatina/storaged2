@@ -265,7 +265,7 @@ class UdisksNVMeTest(udiskstestcase.UdisksTestCase):
         id = self.get_property_raw(drive_obj, '.Drive', 'Id')
         self.assertTrue(id.startswith('Linux-'))
         size = self.get_property_raw(drive_obj, '.Drive', 'Size')
-        self.assertEqual(size, 0)
+        self.assertEqual(size, self.NS_SIZE * self.NUM_NS)
 
         ctrl_id = self.get_property_raw(drive_obj, '.NVMe.Controller', 'ControllerID')
         self.assertGreater(ctrl_id, 0)

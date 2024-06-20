@@ -143,6 +143,7 @@ udisks_linux_drive_object_should_include_device
 UDisksLinuxDrive
 udisks_linux_drive_new
 udisks_linux_drive_update
+udisks_linux_drive_recalculate_nvme_size
 <SUBSECTION Standard>
 UDISKS_LINUX_DRIVE
 UDISKS_IS_LINUX_DRIVE
@@ -283,6 +284,7 @@ udisks_linux_device_read_sysfs_attr_as_int
 udisks_linux_device_read_sysfs_attr_as_uint64
 udisks_linux_device_subsystem_is_nvme
 udisks_linux_device_nvme_is_fabrics
+udisks_linux_device_nvme_tnvmcap_supported
 <SUBSECTION Standard>
 UDISKS_TYPE_LINUX_DEVICE
 UDISKS_LINUX_DEVICE
