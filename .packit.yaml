@@ -24,7 +24,7 @@ jobs:
     - fedora-latest-stable-ppc64le
     - fedora-latest-stable-x86_64
   additional_repos:
-  - "copr://@storage/udisks-daily"
+  - "copr://@storage/temp-reencryption"
 
 - job: tests
   trigger: pull_request
@@ -34,7 +34,7 @@ jobs:
     environments:
       - artifacts:
         - type: repository-file
-          id: https://copr.fedorainfracloud.org/coprs/g/storage/udisks-daily/repo/fedora-$releasever/group_storage-udisks-daily-fedora-$releasever.repo
+          id: https://copr.fedorainfracloud.org/coprs/g/storage/reencryption/repo/fedora-$releasever/group_storage-reencryption-fedora-$releasever.repo
 
 # run tests for udisks consumers, see plans/ with `revdeps == yes`
 - job: tests
@@ -53,7 +53,7 @@ jobs:
         - type: repository-file
           id: https://copr.fedorainfracloud.org/coprs/g/cockpit/main-builds/repo/fedora-$releasever/group_cockpit-main-builds-fedora-$releasever.repo
         - type: repository-file
-          id: https://copr.fedorainfracloud.org/coprs/g/storage/udisks-daily/repo/fedora-$releasever/group_storage-udisks-daily-fedora-$releasever.repo
+          id: https://copr.fedorainfracloud.org/coprs/g/storage/reencryption/repo/fedora-$releasever/group_storage-reencryption-fedora-$releasever.repo
         tmt:
           context:
             revdeps: "yes"

@@ -2360,6 +2360,19 @@
       <arg name="options" direction="in" type="a{sv}"/>
     </method>
 
+    <!--
+      Encrypt:
+      @passphrase: Future passphrase of the LUKS2 device.
+      @options: Options. TODO
+      @since: 2.11.0
+
+      Encrypts a block device to the LUKS2 format.
+    -->
+    <method name="Encrypt">
+      <arg name="passphrase" direction="in" type="s"/>
+      <arg name="options" direction="in" type="a{sv}"/>
+    </method>
+
   </interface>
 
   <!-- ********************************************************************** -->
@@ -3036,6 +3049,19 @@
     -->
     <method name="HeaderBackup">
       <arg name="backup_file" direction="in" type="s"/>
+      <arg name="options" direction="in" type="a{sv}"/>
+    </method>
+
+    <!--
+        Reencrypt:
+        @passphrase: Passphrase to unlock the device.
+        @options: Options. TODO
+        @since: 2.11.0
+
+        Reencrypts a LUKS2 device, i.e. changes one or more of: cipher, cipher mode, volume key.
+    -->
+    <method name="Reencrypt">
+      <arg name="passphrase" direction="in" type="s"/>
       <arg name="options" direction="in" type="a{sv}"/>
     </method>
 
