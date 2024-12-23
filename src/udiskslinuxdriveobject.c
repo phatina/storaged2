@@ -476,6 +476,10 @@ udisks_linux_drive_object_get_block (UDisksLinuxDriveObject *object,
         continue;
 
       device = udisks_linux_block_object_get_device (UDISKS_LINUX_BLOCK_OBJECT (iter_object));
+      if (!device) {
+        continue;
+      }
+
       skip = (g_strcmp0 (g_udev_device_get_devtype (device->udev_device), "disk") != 0
               || (get_hw && udisks_linux_device_is_dm_multipath (device)));
       g_object_unref (device);
