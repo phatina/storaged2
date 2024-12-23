@@ -710,6 +710,33 @@ udisks_mount_monitor_ensure (UDisksMountMonitor *monitor)
 }
 
 /**
+ * udisks_mount_monitor_get_mounts:
+ * @monitor: A #UDisksMountMonitor.
+ *
+ * Gets all #UDisksMount objects.
+ *
+ * Returns: A #GList of #UDisksMount objects. The returned list must
+ * be freed with g_list_free() after each element has been freed with
+ * g_object_unref().
+ */
+GList *
+udisks_mount_monitor_get_mounts (UDisksMountMonitor *monitor)
+{
+  GList *ret;
+
+  ret = NULL;
+
+  g_mutex_lock (&monitor->mounts_mutex);
+  ret = g_list_copy_deep (monitor->mounts, (GCopyFunc) udisks_g_object_ref_copy, NULL);
+  g_mutex_unlock (&monitor->mounts_mutex);
+
+  /* Sort the list to ensure that shortest mount paths appear first */
+  ret = g_list_sort (ret, (GCompareFunc) udisks_mount_compare);
+  
+  return ret;
+}
+
+/**
  * udisks_mount_monitor_get_mounts_for_dev:
  * @monitor: A #UDisksMountMonitor.
  * @dev: A #dev_t device number.

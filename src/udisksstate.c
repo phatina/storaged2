@@ -569,12 +569,49 @@ lookup_asv (GVariant    *asv,
 
 /* ---------------------------------------------------------------------------------------------------- */
 
+/**
+ * udisks_state_get_mounts_for_dev:
+ * @mounts: A #UDisksMount.
+ * @dev: A #dev_t device number.
+ *
+ * Gets all #UDisksMount objects for @dev.
+ *
+ * Returns: A #GList of #UDisksMount objects. The returned list must
+ * be freed with g_list_free() after each element has been freed with
+ * g_object_unref().
+ */
+static GList *
+udisks_state_get_mounts_for_dev (GList *mounts,
+                                 dev_t  dev)
+{
+  GList *ret;
+  GList *l;
+
+  ret = NULL;
+
+  for (l = mounts; l != NULL; l = l->next)
+    {
+      UDisksMount *mount = UDISKS_MOUNT (l->data);
+
+      if (udisks_mount_get_dev (mount) == dev)
+        {
+          ret = g_list_prepend (ret, g_object_ref (mount));
+        }
+    }
+
+  /* Sort the list to ensure that shortest mount paths appear first */
+  ret = g_list_sort (ret, (GCompareFunc) udisks_mount_compare);
+
+  return ret;
+}
+
 /* returns TRUE if the entry should be kept */
 static gboolean
 udisks_state_check_mounted_fs_entry (UDisksState  *state,
                                      GVariant     *value,
                                      GArray       *devs_to_clean,
-                                     dev_t         match_block_device)
+                                     dev_t         match_block_device,
+                                     GList        *monitor_mounts)
 {
   const gchar *mount_point_str;
   gchar mount_point[PATH_MAX] = { '\0', };
@@ -590,7 +627,6 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
   gboolean is_mounted;
   gboolean device_exists;
   gboolean device_to_be_cleaned;
-  UDisksMountMonitor *monitor;
   GUdevClient *udev_client;
   GUdevDevice *udev_device;
   guint n;
@@ -607,8 +643,6 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
   fstab_mount = FALSE;
   details = NULL;
   locked = FALSE;
-
-  monitor = udisks_daemon_get_mount_monitor (state->daemon);
 
   g_variant_get (value,
                  "{&s@a{sv}}",
@@ -668,7 +702,7 @@ udisks_state_check_mounted_fs_entry (UDisksState  *state,
   /* udisks_debug ("Validating mounted-fs entry for mount point %s", mount_point); */
 
   /* Figure out if still mounted */
-  mounts = udisks_mount_monitor_get_mounts_for_dev (monitor, block_device);
+  mounts = udisks_state_get_mounts_for_dev (monitor_mounts, block_device);
   for (l = mounts; l != NULL; l = l->next)
     {
       UDisksMount *mount = UDISKS_MOUNT (l->data);
@@ -870,15 +904,21 @@ udisks_state_check_mounted_fs (UDisksState *state,
     {
       GVariantIter iter;
       GVariant *child;
+      GList *mounts;
+      UDisksMountMonitor *monitor;
+
+      monitor = udisks_daemon_get_mount_monitor (state->daemon);
+      mounts = udisks_mount_monitor_get_mounts(monitor);
       g_variant_iter_init (&iter, value);
       while ((child = g_variant_iter_next_value (&iter)) != NULL)
         {
-          if (udisks_state_check_mounted_fs_entry (state, child, devs_to_clean, match_block_device))
+          if (udisks_state_check_mounted_fs_entry (state, child, devs_to_clean, match_block_device, mounts))
             g_variant_builder_add_value (&builder, child);
           else
             changed = TRUE;
           g_variant_unref (child);
         }
+      g_list_free_full (mounts, g_object_unref);
       g_variant_unref (value);
     }
 
