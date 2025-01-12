@@ -154,7 +154,7 @@ udisks_linux_block_new (void)
 /* ---------------------------------------------------------------------------------------------------- */
 
 static gchar *
-get_sysfs_attr (GUdevDevice *device,
+get_sysfs_attr_from_path (const gchar *sysfs_path,
                 const gchar *attr)
 {
   gchar *filename = NULL;
@@ -162,7 +162,7 @@ get_sysfs_attr (GUdevDevice *device,
   gboolean ret = FALSE;
   GError *error = NULL;
 
-  filename = g_strconcat (g_udev_device_get_sysfs_path (device),
+  filename = g_strconcat (sysfs_path,
                           "/",
                           attr,
                           NULL);
@@ -1025,46 +1025,50 @@ udisks_linux_block_update (UDisksLinuxBlock       *block,
   udisks_block_set_crypto_backing_device (iface, "/");
   if (g_str_has_prefix (g_udev_device_get_name (device->udev_device), "dm-"))
     {
-      gchar *dm_uuid;
-      dm_uuid = get_sysfs_attr (device->udev_device, "dm/uuid");
-      if (dm_uuid != NULL &&
-           (g_str_has_prefix (dm_uuid, "CRYPT-LUKS") || g_str_has_prefix (dm_uuid, "CRYPT-BITLK") || g_str_has_prefix (dm_uuid, "CRYPT-TCRYPT")))
+      gchar *slave_sysfs_path = g_strdup (g_udev_device_get_sysfs_path (device->udev_device));
+      gchar *old_sysfs_path = NULL;
+
+      while (slave_sysfs_path)
         {
-          gchar *slave_sysfs_path;
-          slave_sysfs_path = get_slave_sysfs_path (g_udev_device_get_sysfs_path (device->udev_device));
+          gchar *dm_uuid = get_sysfs_attr_from_path (slave_sysfs_path,"dm/uuid");
 
-          while (slave_sysfs_path)
+          old_sysfs_path = slave_sysfs_path;
+          slave_sysfs_path = get_slave_sysfs_path (old_sysfs_path);
+          g_free (old_sysfs_path);
+
+          if (dm_uuid != NULL)
             {
-              UDisksLinuxBlockObject *slave_object;
-              slave_object = find_block_device_by_sysfs_path (object_manager, slave_sysfs_path);
-              if (slave_object != NULL)
+              if (g_str_has_prefix (dm_uuid, "CRYPT-LUKS") || g_str_has_prefix (dm_uuid, "CRYPT-BITLK") || g_str_has_prefix (dm_uuid, "CRYPT-TCRYPT"))
                 {
-                  UDisksEncrypted *enc;
-
-                  udisks_block_set_crypto_backing_device (iface,
-                                                          g_dbus_object_get_object_path (G_DBUS_OBJECT (slave_object)));
-
-                  /* also set the CleartextDevice property for the parent device */
-                  enc = udisks_object_peek_encrypted (UDISKS_OBJECT (slave_object));
-                  if (enc != NULL)
-                    {
-                      udisks_encrypted_set_cleartext_device (UDISKS_ENCRYPTED (enc),
-                                                             g_dbus_object_get_object_path (G_DBUS_OBJECT (object)));
-                    }
-
-                  g_object_unref (slave_object);
-                  g_free (slave_sysfs_path);
+                  /* found crypted device, break here */
+                  g_free (dm_uuid);
                   break;
-                }
-              else
-                {
-                  gchar *old_sysfs_path = slave_sysfs_path;
-                  slave_sysfs_path = get_slave_sysfs_path (old_sysfs_path);
-                  g_free (old_sysfs_path);
                 }
             }
         }
-      g_free (dm_uuid);
+      if (slave_sysfs_path)
+        {
+          UDisksLinuxBlockObject *slave_object;
+          slave_object = find_block_device_by_sysfs_path (object_manager, slave_sysfs_path);
+          if (slave_object != NULL)
+            {
+              UDisksEncrypted *enc;
+
+              udisks_block_set_crypto_backing_device (iface,
+                                                      g_dbus_object_get_object_path (G_DBUS_OBJECT (slave_object)));
+
+              /* also set the CleartextDevice property for the parent device */
+              enc = udisks_object_peek_encrypted (UDISKS_OBJECT (slave_object));
+              if (enc != NULL)
+                {
+                  udisks_encrypted_set_cleartext_device (UDISKS_ENCRYPTED (enc),
+                                                         g_dbus_object_get_object_path (G_DBUS_OBJECT (object)));
+                }
+
+              g_object_unref (slave_object);
+              g_free (slave_sysfs_path);
+            }
+        }
     }
 
   /* Sort out preferred device... this is what UI shells should
